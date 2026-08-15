@@ -68,63 +68,61 @@ fn lower_bit_permutation(
     let mut result = builder.ins().iconst(I64, permutation.fixed as i64);
 
     for &extract in &permutation.extracts {
-        println!("lower {extract:?}");
         let bits = lower_bit_extract(builder, src, extract);
         result = builder.ins().bor(result, bits);
-    }
-
-    println!("signed shift = {}", permutation.signed_shift);
-    if permutation.signed_shift > 0 {
-        let shift = permutation.signed_shift as i64;
-        result = builder.ins().sshr_imm_u(result, shift);
     }
 
     result
 }
 
 fn lower_bit_extract(builder: &mut FunctionBuilder, src: Value, extract: BitExtract) -> Value {
-    let (src_pos, src_len) = (extract.src_pos as i64, extract.src_len as i64);
-    let (dst_pos, dst_len) = (extract.dst_pos as i64, extract.dst_len as i64);
-
-    match (dst_len / src_len, dst_len % src_len) {
-        // No repetition
-        (0, _) | (1, 0) => {
-            let mask = ((1 << dst_len) - 1) << src_pos;
-            let bits = builder.ins().band_imm_u(src, mask);
-            shift_bits(builder, bits, src_pos, dst_pos)
-        }
-        // Repetition with two shift and masks
-        (1, _) => {
-            let rep1 = lower_bit_extract(builder, src, extract.nth_repeat(0));
-            let rep2 = lower_bit_extract(builder, src, extract.nth_repeat(1));
-            builder.ins().bor(rep1, rep2)
-        }
-        // Repetition with a mask and two shifts
-        (2, 0) => {
-            let mask = ((1 << src_len) - 1) << src_pos;
-            let bits = builder.ins().band_imm_u(src, mask);
-            let rep1 = shift_bits(builder, bits, src_pos, dst_pos);
-            let rep2 = shift_bits(builder, bits, src_pos, dst_pos + src_len);
-            builder.ins().bor(rep1, rep2)
-        }
-        // Repetition with multiply
-        (_, _) => {
-            let bits = builder.ins().ushr_imm_u(src, src_pos);
-            let bits = builder.ins().band_imm_u(bits, (1 << src_len) - 1);
-            let multiplicand = (0..dst_len)
-                .step_by(src_len as usize)
-                .map(|i| 1 << i)
-                .fold(0, |a, b| a | b);
-            let bits = builder.ins().imul_imm_u(bits, multiplicand << dst_pos);
-            if (dst_len % src_len) != 0 && (dst_pos + dst_len) < 64 {
-                let mask = ((1 << dst_len) - 1) << dst_pos;
-                builder.ins().band_imm_u(bits, mask)
-            } else {
-                bits
-            }
-        }
-    }
+    let bits = builder.ins().band_imm_u(src, extract.mask as i64);
+    shift_bits(builder, bits, 0, extract.shift as i64)
 }
+
+// fn lower_bit_extract(builder: &mut FunctionBuilder, src: Value, extract: BitExtract) -> Value {
+//     let (src_pos, src_len) = (extract.src_pos as i64, extract.src_len as i64);
+//     let (dst_pos, dst_len) = (extract.dst_pos as i64, extract.dst_len as i64);
+
+//     match (dst_len / src_len, dst_len % src_len) {
+//         // No repetition
+//         (0, _) | (1, 0) => {
+//             let mask = ((1 << dst_len) - 1) << src_pos;
+//             let bits = builder.ins().band_imm_u(src, mask);
+//             shift_bits(builder, bits, src_pos, dst_pos)
+//         }
+//         // Repetition with two shift and masks
+//         (1, _) => {
+//             let rep1 = lower_bit_extract(builder, src, extract.nth_repeat(0));
+//             let rep2 = lower_bit_extract(builder, src, extract.nth_repeat(1));
+//             builder.ins().bor(rep1, rep2)
+//         }
+//         // Repetition with a mask and two shifts
+//         (2, 0) => {
+//             let mask = ((1 << src_len) - 1) << src_pos;
+//             let bits = builder.ins().band_imm_u(src, mask);
+//             let rep1 = shift_bits(builder, bits, src_pos, dst_pos);
+//             let rep2 = shift_bits(builder, bits, src_pos, dst_pos + src_len);
+//             builder.ins().bor(rep1, rep2)
+//         }
+//         // Repetition with multiply
+//         (_, _) => {
+//             let bits = builder.ins().ushr_imm_u(src, src_pos);
+//             let bits = builder.ins().band_imm_u(bits, (1 << src_len) - 1);
+//             let multiplicand = (0..dst_len)
+//                 .step_by(src_len as usize)
+//                 .map(|i| 1 << i)
+//                 .fold(0, |a, b| a | b);
+//             let bits = builder.ins().imul_imm_u(bits, multiplicand << dst_pos);
+//             if (dst_len % src_len) != 0 && (dst_pos + dst_len) < 64 {
+//                 let mask = ((1 << dst_len) - 1) << dst_pos;
+//                 builder.ins().band_imm_u(bits, mask)
+//             } else {
+//                 bits
+//             }
+//         }
+//     }
+// }
 
 fn shift_bits(builder: &mut FunctionBuilder, src: Value, src_pos: i64, dst_pos: i64) -> Value {
     match src_pos.cmp(&dst_pos) {
@@ -150,14 +148,14 @@ mod test {
 
     #[test]
     fn lower_bit_extract_test() {
-        let extract = BitExtract { src_pos: 5, src_len: 3, dst_pos: 2, dst_len: 8, offset: 0 };
+        let extract = BitExtract { mask: 0b111_00000, shift: -3 };
         let cases = [
-            (0b00_000_00000, 0b00_000_000_00),
-            (0b11_111_11111, 0b11_111_111_00),
-            (0b00_010_01010, 0b10_010_010_00),
-            (0b11_101_10101, 0b01_101_101_00),
-            (0b01_001_11000, 0b01_001_001_00),
-            (0b10_110_00111, 0b10_110_110_00),
+            (0b00_000_00000, 0b000_00),
+            (0b11_111_11111, 0b111_00),
+            (0b00_010_01010, 0b010_00),
+            (0b11_101_10101, 0b101_00),
+            (0b01_001_11000, 0b001_00),
+            (0b10_110_00111, 0b110_00),
         ];
         test_bit_extract(extract, &cases);
     }

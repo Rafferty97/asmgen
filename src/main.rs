@@ -6,10 +6,10 @@ mod codegen;
 
 fn main() {
     let i_imm = BitPermutation::new([
-        BitPermutationPart::Slice { len: 1, src_pos: 20, src_len: 1 },
-        BitPermutationPart::Slice { len: 4, src_pos: 21, src_len: 4 },
-        BitPermutationPart::Slice { len: 6, src_pos: 25, src_len: 6 },
-        BitPermutationPart::Slice { len: 21, src_pos: 31, src_len: 1 },
+        BitPermutationPart::Slice { len: 1, src_pos: 20, repeats: 1 },
+        BitPermutationPart::Slice { len: 4, src_pos: 21, repeats: 1 },
+        BitPermutationPart::Slice { len: 6, src_pos: 25, repeats: 1 },
+        BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 21 },
     ]);
 
     let code = compile_bit_permutation(&i_imm);
