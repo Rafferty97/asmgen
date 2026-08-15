@@ -10,6 +10,7 @@ fn main() {
         BitPermutationPart::Slice { len: 4, src_pos: 21, repeats: 1 },
         BitPermutationPart::Slice { len: 6, src_pos: 25, repeats: 1 },
         BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 21 },
+        // BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 53 },
     ]);
 
     let code = compile_bit_permutation(&i_imm);

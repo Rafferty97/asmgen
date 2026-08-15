@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cranelift-codegen = "0.134.3"
+cranelift-codegen = { version = "0.134.3", features = ["riscv64", "x86"] }
 cranelift-frontend = "0.134.3"
 cranelift-jit = "0.134.3"
 cranelift-module = "0.134.3"

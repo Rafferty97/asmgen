@@ -16,13 +16,14 @@ pub enum BitPermutationPart {
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BitExtract {
     pub mask: u64,
-    pub shift: i8,
+    pub shift: u8,
+    pub mul: u64,
 }
 
 impl BitPermutation {
     pub fn new(parts: impl IntoIterator<Item = BitPermutationPart>) -> Self {
         let mut fixed = 0;
-        let mut extracts = HashMap::new();
+        let mut shift_to_mask = HashMap::new();
 
         let mut dst_pos = 0;
         for part in parts.into_iter() {
@@ -32,11 +33,13 @@ impl BitPermutation {
                     dst_pos += len;
                 }
                 BitPermutationPart::Slice { len, src_pos, repeats } => {
+                    if len == 0 {
+                        continue;
+                    }
                     for _ in 0..repeats {
-                        let mask = make_mask(src_pos, len);
                         let shift = (dst_pos as i8) - (src_pos as i8);
-                        let entry = extracts.entry(shift).or_insert(0);
-                        *entry |= mask;
+                        let entry = shift_to_mask.entry(shift).or_insert(0);
+                        *entry |= make_mask(src_pos, len);
                         dst_pos += len;
                     }
                 }
@@ -44,11 +47,20 @@ impl BitPermutation {
         }
         let len = dst_pos;
 
-        let mut extracts: Vec<_> = extracts
+        let mut mask_to_muls = HashMap::new();
+        for (shift, mask) in shift_to_mask {
+            let entry = mask_to_muls.entry(mask).or_insert(0);
+            *entry |= 1 << (mask.trailing_zeros() as i8 + shift);
+        }
+
+        let mut extracts: Vec<_> = mask_to_muls
             .into_iter()
-            .map(|(shift, mask)| BitExtract { mask, shift })
+            .map(|(mask, mul)| {
+                let shift = mask.trailing_zeros() as u8;
+                BitExtract { mask, shift, mul }
+            })
             .collect();
-        extracts.sort_by_key(|e| e.shift);
+        extracts.sort_by_key(|e| e.mask);
 
         Self { len, fixed, extracts }
     }
@@ -59,7 +71,17 @@ impl BitPermutation {
     }
 
     pub fn optimise(&mut self) {
-        //
+        for ex in &mut self.extracts {
+            let shift = ex.shift.min(ex.mul.trailing_zeros() as u8);
+            ex.shift -= shift;
+            ex.mul >>= shift;
+        }
+
+        // todo: sign-extension optimisation
+        // todo: sub trick for run of 1s
+        // todo: multiply vs shift-or optimisation (popcount == 2)
+        // todo: schedule OR operations as a binary tree to minimise latency
+        // todo: investigate fused shift-or on aarch64
     }
 
     // pub fn optimise(&mut self) {
@@ -104,7 +126,7 @@ impl BitExtract {
     }
 
     pub fn exec(self, src: u64) -> u64 {
-        shift_bits(src & self.mask, 0, self.shift)
+        ((src & self.mask) >> self.shift) * self.mul
     }
 }
 
@@ -138,6 +160,8 @@ mod test {
             BitPermutationPart::Slice { len: 3, src_pos: 5, repeats: 2 },
             BitPermutationPart::Slice { len: 2, src_pos: 5, repeats: 1 },
         ]);
+
+        println!("{permutation:?}");
 
         assert_eq!(permutation.exec(0b00_000_00000), 0b00_000_000_11);
         assert_eq!(permutation.exec(0b11_111_11111), 0b11_111_111_11);

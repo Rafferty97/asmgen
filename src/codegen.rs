@@ -19,7 +19,9 @@ pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
     flags.set("is_pic", "false").unwrap();
     flags.set("opt_level", "speed").unwrap();
 
-    let isa = isa::lookup(target_lexicon::Triple::host()).unwrap();
+    let target = target_lexicon::Triple::host();
+    // let target = target_lexicon::Triple::from_str("riscv64gc-unknown-unknown").unwrap();
+    let isa = isa::lookup(target).unwrap();
     let isa = isa.finish(settings::Flags::new(flags)).unwrap();
     let frontend_config = isa.frontend_config();
 
@@ -65,9 +67,11 @@ fn lower_bit_permutation(
 ) -> Value {
     use cranelift_codegen::ir::types::I64;
 
+    println!("fixed = {}", permutation.fixed);
     let mut result = builder.ins().iconst(I64, permutation.fixed as i64);
 
     for &extract in &permutation.extracts {
+        println!("{extract:?}");
         let bits = lower_bit_extract(builder, src, extract);
         result = builder.ins().bor(result, bits);
     }
@@ -77,7 +81,9 @@ fn lower_bit_permutation(
 
 fn lower_bit_extract(builder: &mut FunctionBuilder, src: Value, extract: BitExtract) -> Value {
     let bits = builder.ins().band_imm_u(src, extract.mask as i64);
-    shift_bits(builder, bits, 0, extract.shift as i64)
+    let bits = builder.ins().ushr_imm_u(bits, extract.shift as i64);
+    let bits = builder.ins().imul_imm_u(bits, extract.mul as i64);
+    bits
 }
 
 // fn lower_bit_extract(builder: &mut FunctionBuilder, src: Value, extract: BitExtract) -> Value {
@@ -148,7 +154,7 @@ mod test {
 
     #[test]
     fn lower_bit_extract_test() {
-        let extract = BitExtract { mask: 0b111_00000, shift: -3 };
+        let extract = BitExtract { mask: 0b111_00000, shift: 5, mul: 0b100 };
         let cases = [
             (0b00_000_00000, 0b000_00),
             (0b11_111_11111, 0b111_00),
