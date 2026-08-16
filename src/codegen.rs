@@ -79,11 +79,23 @@ fn lower_bit_permutation(
     result
 }
 
-fn lower_bit_extract(builder: &mut FunctionBuilder, src: Value, extract: BitExtract) -> Value {
-    let bits = builder.ins().band_imm_u(src, extract.mask as i64);
-    let bits = builder.ins().ushr_imm_u(bits, extract.shift as i64);
-    let bits = builder.ins().imul_imm_u(bits, extract.mul as i64);
-    bits
+fn lower_bit_extract(builder: &mut FunctionBuilder, value: Value, extract: BitExtract) -> Value {
+    match extract {
+        BitExtract::LeftShift { mask, lshift } => {
+            let value = builder.ins().band_imm_u(value, mask as i64);
+            builder.ins().ishl_imm_u(value, lshift as i64)
+        }
+        BitExtract::RightShiftMul { mask, rshift, mul } => {
+            let value = builder.ins().band_imm_u(value, mask as i64);
+            let value = builder.ins().ushr_imm_u(value, rshift as i64);
+            builder.ins().imul_imm_u(value, mul as i64)
+        }
+        BitExtract::SignExtend { lshift, rshift, mask } => {
+            let value = builder.ins().ishl_imm_u(value, lshift as i64);
+            let value = builder.ins().sshr_imm_u(value, rshift as i64);
+            builder.ins().band_imm_u(value, mask as i64)
+        }
+    }
 }
 
 // fn lower_bit_extract(builder: &mut FunctionBuilder, src: Value, extract: BitExtract) -> Value {
@@ -154,7 +166,7 @@ mod test {
 
     #[test]
     fn lower_bit_extract_test() {
-        let extract = BitExtract { mask: 0b111_00000, shift: 5, mul: 0b100 };
+        let extract = BitExtract::RightShiftMul { mask: 0b111_00000, rshift: 5, mul: 0b100 };
         let cases = [
             (0b00_000_00000, 0b000_00),
             (0b11_111_11111, 0b111_00),

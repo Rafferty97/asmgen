@@ -3,21 +3,17 @@ use crate::codegen::compile_bit_permutation;
 
 mod bit_permutation;
 mod codegen;
+mod playground;
 
 fn main() {
     let i_imm = BitPermutation::new([
-        BitPermutationPart::Slice { len: 1, src_pos: 20, repeats: 1 },
-        BitPermutationPart::Slice { len: 4, src_pos: 21, repeats: 1 },
-        BitPermutationPart::Slice { len: 6, src_pos: 25, repeats: 1 },
+        BitPermutationPart::Slice { len: 11, src_pos: 20, repeats: 1 },
         BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 21 },
-        // BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 53 },
+        BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 32 },
     ]);
 
     let code = compile_bit_permutation(&i_imm);
     println!("{code}");
-
-    let opt_code = compile_bit_permutation(&i_imm.optimised());
-    println!("{opt_code}");
 }
 
 struct Decoder {

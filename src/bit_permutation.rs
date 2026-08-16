@@ -13,17 +13,17 @@ pub enum BitPermutationPart {
     Slice { len: u8, src_pos: u8, repeats: u8 },
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub struct BitExtract {
-    pub mask: u64,
-    pub shift: u8,
-    pub mul: u64,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BitExtract {
+    LeftShift { mask: u64, lshift: u32 },
+    RightShiftMul { mask: u64, rshift: u32, mul: u64 },
+    SignExtend { lshift: u32, rshift: u32, mask: u64 },
 }
 
 impl BitPermutation {
     pub fn new(parts: impl IntoIterator<Item = BitPermutationPart>) -> Self {
         let mut fixed = 0;
-        let mut shift_to_mask = HashMap::new();
+        let mut shifts = [0; 64];
 
         let mut dst_pos = 0;
         for part in parts.into_iter() {
@@ -37,9 +37,8 @@ impl BitPermutation {
                         continue;
                     }
                     for _ in 0..repeats {
-                        let shift = (dst_pos as i8) - (src_pos as i8);
-                        let entry = shift_to_mask.entry(shift).or_insert(0);
-                        *entry |= make_mask(src_pos, len);
+                        let shift = dst_pos.wrapping_sub(src_pos) & 63;
+                        shifts[shift as usize] |= make_mask(src_pos, len);
                         dst_pos += len;
                     }
                 }
@@ -47,69 +46,59 @@ impl BitPermutation {
         }
         let len = dst_pos;
 
-        let mut mask_to_muls = HashMap::new();
-        for (shift, mask) in shift_to_mask {
-            let entry = mask_to_muls.entry(mask).or_insert(0);
-            *entry |= 1 << (mask.trailing_zeros() as i8 + shift);
+        let mut groups = HashMap::new();
+        for (shift, mask) in shifts.into_iter().enumerate() {
+            *groups.entry(mask).or_insert(0) |= 1u64 << shift;
         }
 
-        let mut extracts: Vec<_> = mask_to_muls
-            .into_iter()
-            .map(|(mask, mul)| {
-                let shift = mask.trailing_zeros() as u8;
-                BitExtract { mask, shift, mul }
-            })
-            .collect();
-        extracts.sort_by_key(|e| e.mask);
+        let mut extracts = vec![];
+        for (src_mask, shifts) in groups {
+            if src_mask == 0 {
+                continue;
+            }
+            println!("{src_mask:064b}\t{shifts:064b}");
+            match (src_mask.count_ones(), shifts.count_ones()) {
+                (0, _) | (_, 0) => {}
+                (1, 2..) => {
+                    let lshift = src_mask.leading_zeros();
+                    let mut mask = shifts.rotate_left(src_mask.trailing_zeros());
+                    let rshift = 63 - mask.trailing_zeros();
+                    extracts.push(BitExtract::SignExtend { lshift, rshift, mask });
+                }
+                (_, 3..) => {
+                    let mask = src_mask;
+                    let mut rshift = src_mask.trailing_zeros();
+                    let mut mul = shifts.rotate_left(rshift);
+                    if rshift <= mul.trailing_zeros() {
+                        mul >>= rshift;
+                        rshift = 0;
+                    }
+                    extracts.push(BitExtract::RightShiftMul { mask, rshift, mul });
+                }
+                _ => {
+                    let mask = src_mask;
+                    let max_lshift = src_mask.leading_zeros();
+                    for lshift in SetBits(shifts) {
+                        extracts.push(match lshift > max_lshift {
+                            false => BitExtract::LeftShift { mask, lshift },
+                            true => BitExtract::RightShiftMul { mask, rshift: 64 - lshift, mul: 1 },
+                        });
+                    }
+                }
+            }
+        }
+
+        for extract in &mut extracts {
+            match extract {
+                BitExtract::SignExtend { lshift, rshift, mask } => {
+                    *mask |= (1 << lshift.saturating_sub(*rshift)) - 1;
+                }
+                _ => {}
+            }
+        }
 
         Self { len, fixed, extracts }
     }
-
-    pub fn optimised(mut self) -> Self {
-        self.optimise();
-        self
-    }
-
-    pub fn optimise(&mut self) {
-        for ex in &mut self.extracts {
-            let shift = ex.shift.min(ex.mul.trailing_zeros() as u8);
-            ex.shift -= shift;
-            ex.mul >>= shift;
-        }
-
-        // todo: sign-extension optimisation
-        // todo: sub trick for run of 1s
-        // todo: multiply vs shift-or optimisation (popcount == 2)
-        // todo: schedule OR operations as a binary tree to minimise latency
-        // todo: investigate fused shift-or on aarch64
-    }
-
-    // pub fn optimise(&mut self) {
-    //     // Convert repeated bit to signed shift
-    //     if let Some(shift) = self
-    //         .extracts
-    //         .last()
-    //         .filter(|e| e.src_len == 1 && e.dst_pos + e.dst_len >= self.len)
-    //         .map(|e| (u64::BITS as u8 - e.dst_pos) - 1)
-    //         .filter(|shift| *shift > 0)
-    //     {
-    //         self.fixed <<= shift;
-    //         self.signed_shift += shift;
-    //         self.extracts.iter_mut().for_each(|e| e.shift_left(shift));
-    //     }
-
-    //     // Merge and prune extracts
-    //     for i in 0..(self.extracts.len() - 1) {
-    //         let [left, right] = &mut self.extracts[i..][..2] else {
-    //             unreachable!()
-    //         };
-    //         if let Some(merged) = left.try_merge(*right) {
-    //             *left = BitExtract::default();
-    //             *right = merged;
-    //         }
-    //     }
-    //     self.extracts.retain(|e| !e.is_empty());
-    // }
 
     pub fn exec(&self, src: u64) -> u64 {
         let mut dst = self.fixed;
@@ -121,12 +110,14 @@ impl BitPermutation {
 }
 
 impl BitExtract {
-    pub fn is_empty(self) -> bool {
-        self.mask == 0
-    }
-
     pub fn exec(self, src: u64) -> u64 {
-        ((src & self.mask) >> self.shift) * self.mul
+        match self {
+            Self::LeftShift { mask, lshift } => (src & mask) << lshift,
+            Self::RightShiftMul { mask, rshift, mul } => ((src & mask) >> rshift) * mul,
+            Self::SignExtend { lshift, rshift, mask } => {
+                ((((src as i64) << lshift) >> rshift) as u64) & mask
+            }
+        }
     }
 }
 
@@ -146,6 +137,23 @@ where
         Ordering::Equal => bits,
         Ordering::Less => bits << (dst_pos - src_pos),
         Ordering::Greater => bits >> (src_pos - dst_pos),
+    }
+}
+
+struct SetBits(u64);
+
+impl Iterator for SetBits {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.0 {
+            0 => None,
+            bits => {
+                let pos = bits.trailing_zeros();
+                self.0 &= self.0 - 1;
+                Some(pos)
+            }
+        }
     }
 }
 
