@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, hint::unreachable_unchecked};
 
 use cranelift_codegen::ir::{InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -80,22 +80,41 @@ fn lower_bit_permutation(
 }
 
 fn lower_bit_extract(builder: &mut FunctionBuilder, value: Value, extract: BitExtract) -> Value {
-    match extract {
-        BitExtract::LeftShift { mask, lshift } => {
-            let value = builder.ins().band_imm_u(value, mask as i64);
-            builder.ins().ishl_imm_u(value, lshift as i64)
+    let value = match (extract.rol, extract.shl) {
+        (0, _) => value,
+        (amt, false) => builder.ins().rotl_imm_u(value, amt as i64),
+        (amt, true) => builder.ins().ishl_imm_u(value, amt as i64),
+    };
+
+    let value = match extract.sar {
+        0 => value,
+        amt => builder.ins().sshr_imm_u(value, amt as i64),
+    };
+
+    let value = match (extract.ror, extract.shr) {
+        (0, _) => value,
+        (amt, false) => builder.ins().rotr_imm_u(value, amt as i64),
+        (amt, true) => builder.ins().ushr_imm_u(value, amt as i64),
+    };
+
+    let value = match extract.mul.count_ones() {
+        0 => unsafe { unreachable_unchecked() },
+        1 => value,
+        2 => {
+            let shift = 63 - extract.mul.leading_zeros();
+            let shifted = builder.ins().ishl_imm_u(value, shift as i64);
+            builder.ins().bor(value, shifted)
         }
-        BitExtract::RightShiftMul { mask, rshift, mul } => {
-            let value = builder.ins().band_imm_u(value, mask as i64);
-            let value = builder.ins().ushr_imm_u(value, rshift as i64);
-            builder.ins().imul_imm_u(value, mul as i64)
-        }
-        BitExtract::SignExtend { lshift, rshift, mask } => {
-            let value = builder.ins().ishl_imm_u(value, lshift as i64);
-            let value = builder.ins().sshr_imm_u(value, rshift as i64);
-            builder.ins().band_imm_u(value, mask as i64)
-        }
-    }
+        // todo: elide `ror` if possible
+        _ => builder.ins().imul_imm_u(value, extract.mul as i64),
+    };
+
+    let value = match extract.and {
+        u64::MAX => value,
+        mask => builder.ins().band_imm_u(value, mask as i64),
+    };
+
+    value
 }
 
 // fn lower_bit_extract(builder: &mut FunctionBuilder, src: Value, extract: BitExtract) -> Value {
@@ -166,7 +185,8 @@ mod test {
 
     #[test]
     fn lower_bit_extract_test() {
-        let extract = BitExtract::RightShiftMul { mask: 0b111_00000, rshift: 5, mul: 0b100 };
+        // let extract = BitExtract::ShiftMul { mask: 0b111_00000, rshift: 5, mul: 0b100 };
+        let extract = BitExtract::new_ror(0b111_00000, 3);
         let cases = [
             (0b00_000_00000, 0b000_00),
             (0b11_111_11111, 0b111_00),
