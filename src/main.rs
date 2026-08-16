@@ -9,7 +9,7 @@ fn main() {
     let i_imm = BitPermutation::new([
         BitPermutationPart::Slice { len: 11, src_pos: 20, repeats: 1 },
         BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 21 },
-        // BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 32 },
+        BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 32 },
     ]);
 
     let code = compile_bit_permutation(&i_imm);

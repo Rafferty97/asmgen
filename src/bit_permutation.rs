@@ -4,6 +4,8 @@ use std::hint::unreachable_unchecked;
 use std::ops::{BitAnd, Shl, Shr};
 use std::u64;
 
+use cranelift_codegen::bitset::scalar::ScalarBitSetStorage;
+
 use crate::playground::min_cost_cover;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -21,24 +23,111 @@ pub enum BitPermutationPart {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BitExtract {
-    /// A left rotation
-    pub rol: u8,
-    /// An arithmetic right shift
+    /// Pre-shift
+    pub sh1: RotateOrShift,
+    /// Right arithmetic shift
     pub sar: u8,
-    /// A right rotation
-    pub ror: u8,
-    /// A bitwise and
+    /// Post-shift
+    pub sh2: RotateOrShift,
+    /// Mask
     pub and: u64,
-    /// A multiplication, guaranteed to have the low bit set
+    /// Multiply
     pub mul: u64,
-    /// Whether to substitute the left rotation with a logical shift
-    pub shl: bool,
-    /// Whether to substitute the right rotation with a logical shift
-    pub shr: bool,
     /// The operation cost
     pub cost: u8,
     /// The covering mask
     pub cover: u64,
+}
+
+impl Default for BitExtract {
+    fn default() -> Self {
+        Self {
+            sh1: RotateOrShift::None,
+            sar: 0,
+            sh2: RotateOrShift::None,
+            and: u64::MAX,
+            mul: 1,
+            cost: 0,
+            cover: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RotateOrShift {
+    None,
+    ShiftLeft(u8),
+    ShiftRight(u8),
+    RotateLeft(u8),
+}
+
+impl RotateOrShift {
+    fn new(rol: u8, dst_mask: u64) -> Self {
+        if rol == 0 {
+            return Self::None;
+        }
+
+        let shl = Self::ShiftLeft(rol);
+        if dst_mask & shl.zero_bits() == 0 {
+            return shl;
+        }
+
+        let shr = Self::ShiftRight(64 - rol);
+        if dst_mask & shr.zero_bits() == 0 {
+            return shr;
+        }
+
+        Self::RotateLeft(rol)
+    }
+
+    fn zero_bits(self) -> u64 {
+        match self {
+            Self::None => 0,
+            Self::ShiftLeft(amt) => right_mask(amt),
+            Self::ShiftRight(amt) => left_mask(amt),
+            Self::RotateLeft(_) => 0,
+        }
+    }
+
+    fn cost(self) -> u8 {
+        match self {
+            Self::None => 0,
+            _ => 1,
+        }
+    }
+
+    fn exec(self, value: u64) -> u64 {
+        match self {
+            Self::None => value,
+            Self::ShiftLeft(amt) => value << amt,
+            Self::ShiftRight(amt) => value >> amt,
+            Self::RotateLeft(amt) => value.rotate_left(amt as u32),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ShiftExtract {
+    /// Left rotation
+    pub rol: u8,
+    /// Destination mask
+    pub dst_mask: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct RepeatExtract {
+    /// Source mask
+    pub src_mask: u64,
+    /// Left rotation mask
+    pub rol_mask: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct BroadcastExtract {
+    /// Bit position being broadcast
+    pub src_pos: u8,
+    /// Destination mask
+    pub dst_mask: u64,
 }
 
 impl BitPermutation {
@@ -47,6 +136,8 @@ impl BitPermutation {
         let mut dst_pos = 0;
         let mut fixed = 0;
         let mut rol_masks = [0; 64];
+
+        // For each (shift, broadcast) pair, determine best feasible combination
 
         for part in parts.into_iter() {
             match part {
@@ -77,41 +168,58 @@ impl BitPermutation {
         }
 
         // Generate candidates
-        let mut candidates = vec![];
-        for (src_mask, rols) in groups {
-            // println!("{src_mask:064b}\t{rols:064b}");
+        let mut shifts = vec![];
+        let mut broadcasts = vec![];
+        let mut repeats = vec![];
 
+        for (src_mask, rol_mask) in groups {
             let one_bit_src = src_mask.count_ones() == 1;
-            let multi_bit_dst = rols.count_ones() > 1;
+            let multi_bit_dst = rol_mask.count_ones() > 1;
 
             if one_bit_src && multi_bit_dst {
-                let src_bit = src_mask.trailing_zeros() as u8;
-                let dst_mask = rols.rotate_left(src_bit as u32);
-                candidates.push(BitExtract::new_broadcast(src_bit, dst_mask));
+                let src_pos = src_mask.trailing_zeros() as u8;
+                let dst_mask = rol_mask.rotate_left(src_pos as u32);
+                broadcasts.push(BroadcastExtract { src_pos, dst_mask });
             } else {
-                for rol in SetBits(rols) {
-                    candidates.push(BitExtract::new_rol(src_mask, rol));
+                for rol in SetBits(rol_mask) {
+                    let dst_mask = src_mask.rotate_left(rol as u32);
+                    shifts.push(ShiftExtract { rol, dst_mask });
                 }
                 if multi_bit_dst {
-                    candidates.push(BitExtract::new_repeat(src_mask, rols));
+                    repeats.push(RepeatExtract { src_mask, rol_mask });
                 }
             }
         }
 
-        // todo: fuse shifts and broadcasts where possible
+        let mut candidates = vec![];
 
-        for candidate in &mut candidates {
-            candidate.simplify();
-            candidate.calc_cost();
-            // println!("{candidate:?}\n{:064b}\n", candidate.cover);
+        for shift in &shifts {
+            candidates.push(BitExtract::new_shift(*shift));
         }
 
+        for broadcast in broadcasts {
+            candidates.push(BitExtract::new_broadcast(broadcast));
+
+            for shift in &shifts {
+                // todo
+            }
+        }
+
+        for repeat in repeats {
+            // todo
+        }
+
+        for candidate in &mut candidates {
+            candidate.calc_cost();
+        }
+
+        // Find minimum cost
         let extracts = min_cost_cover(&candidates)
             .into_iter()
             .map(|idx| candidates[idx])
             .collect();
 
-        // fixme: exploit known-zero bits (will need API to express)
+        // todo: exploit known-zero bits (will need API to express)
 
         Self { len, fixed, extracts }
     }
@@ -125,97 +233,96 @@ impl BitPermutation {
     }
 }
 
-impl Default for BitExtract {
-    fn default() -> Self {
-        Self {
-            rol: 0,
-            sar: 0,
-            ror: 0,
-            mul: 1,
-            and: u64::MAX,
-            shl: false,
-            shr: false,
-            cost: 0,
-            cover: 0,
-        }
-    }
-}
-
 impl BitExtract {
-    pub fn new_rol(src_mask: u64, rol: u8) -> Self {
-        debug_assert_ne!(src_mask, 0);
-        debug_assert!(rol < 64);
+    pub fn new_shift(extract: ShiftExtract) -> Self {
+        let ShiftExtract { rol, dst_mask } = extract;
 
-        let mask = src_mask.rotate_left(rol as u32);
+        let sh1 = RotateOrShift::None;
+        let sar = 0;
+        let sh2 = RotateOrShift::new(rol, dst_mask);
+        let and = match dst_mask | sh2.zero_bits() {
+            u64::MAX => u64::MAX,
+            _ => dst_mask,
+        };
+        let mul = 1;
+        let cost = 0;
+        let cover = dst_mask;
 
-        Self { rol, and: mask, cover: mask, ..Default::default() }
+        Self { sh1, sar, sh2, and, mul, cost, cover }
     }
 
-    pub fn new_ror(src_mask: u64, ror: u8) -> Self {
-        debug_assert!(ror < 64);
-        Self::new_rol(src_mask, (64 - ror) % 64)
+    pub fn new_broadcast(extract: BroadcastExtract) -> Self {
+        let BroadcastExtract { src_pos, dst_mask } = extract;
+
+        let sh1 = RotateOrShift::ShiftLeft(63 - src_pos);
+        let sar = (63 - dst_mask.trailing_zeros()) as u8;
+        let sh2 = RotateOrShift::None;
+        let and = dst_mask | right_mask(dst_mask.trailing_zeros() as u8);
+        let mul = 1;
+        let cost = 0;
+        let cover = dst_mask;
+
+        Self { sh1, sar, sh2, and, mul, cost, cover }
     }
 
-    pub fn new_broadcast(src_bit: u8, dst_mask: u64) -> Self {
-        debug_assert!(src_bit < 64);
-        debug_assert_ne!(dst_mask, 0);
+    // pub fn new_repeat(extract: RepeatExtract) -> Self {
+    //     let RepeatExtract { src_mask, rol_masks } = extract;
 
-        let cover = find_smallest_cover(dst_mask);
-        let rol = 63 - src_bit;
-        let sar = cover.len - 1;
-        let ror = 63 - sar - cover.pos;
+    //     let sh1 = RotateOrShift::ShiftLeft(63 - src_pos);
+    //     let sar = (63 - dst_mask.trailing_zeros()) as u8;
+    //     let sh2 = RotateOrShift::None;
+    //     let and = dst_mask | right_mask(dst_mask.trailing_zeros() as u8);
+    //     let mul = 1;
+    //     let cost = 0;
+    //     let cover = dst_mask;
 
-        Self { rol, sar, ror, and: dst_mask, cover: dst_mask, ..Default::default() }
-    }
+    //     Self { sh1, sar, sh2, and, mul, cost, cover }
+    // }
 
-    pub fn new_repeat(src_mask: u64, rols: u64) -> Self {
-        let cover = find_smallest_cover(rols);
-        let ror = cover.pos;
-        let and = src_mask.rotate_left(ror as u32);
-        let mul = rols.rotate_right(ror as u32);
-        let cover = and.wrapping_mul(mul);
+    // pub fn new_rol(src_mask: u64, rol: u8) -> Self {
+    //     debug_assert_ne!(src_mask, 0);
+    //     debug_assert!(rol < 64);
 
-        Self { ror, and, mul, cover, ..Default::default() }
-    }
+    //     let mask = src_mask.rotate_left(rol as u32);
 
-    fn simplify(&mut self) {
-        // Combine rol and ror
-        if self.sar == 0 {
-            let offset = u8::min(self.rol, self.ror);
-            self.rol -= offset;
-            self.ror -= offset;
-        }
+    //     Self { rol, and: mask, cover: mask, ..Default::default() }
+    // }
 
-        // Reduce rotations to shifts where possible
-        // if !self.shl && self.rol != 0 {
-        //     let mask = self.exec(u64::MAX);
-        //     // println!("shl mask = {}", PrintBinary(mask));
-        //     // println!("        vs {}", PrintBinary(self.and));
-        //     if self.and & mask == 0 {
-        //         self.shl = true;
-        //         self.and |= mask;
-        //     }
-        // }
+    // pub fn new_ror(src_mask: u64, ror: u8) -> Self {
+    //     debug_assert!(ror < 64);
+    //     Self::new_rol(src_mask, (64 - ror) % 64)
+    // }
 
-        // if !self.shr && self.ror != 0 {
-        //     let mask = self.exec(u64::MAX);
-        //     // println!("shr mask = {}", PrintBinary(mask));
-        //     // println!("        vs {}", PrintBinary(self.and));
-        //     if self.and & mask == 0 {
-        //         self.shr = true;
-        //         self.and |= mask;
-        //     }
-        // }
-    }
+    // pub fn new_broadcast(src_bit: u8, dst_mask: u64) -> Self {
+    //     debug_assert!(src_bit < 64);
+    //     debug_assert_ne!(dst_mask, 0);
+
+    //     let cover = find_smallest_cover(dst_mask);
+    //     let rol = 63 - src_bit;
+    //     let sar = cover.len - 1;
+    //     let ror = 63 - sar - cover.pos;
+
+    //     Self { rol, sar, ror, and: dst_mask, cover: dst_mask, ..Default::default() }
+    // }
+
+    // pub fn new_repeat(src_mask: u64, rols: u64) -> Self {
+    //     let cover = find_smallest_cover(rols);
+    //     let ror = cover.pos;
+    //     let and = src_mask.rotate_left(ror as u32);
+    //     let mul = rols.rotate_right(ror as u32);
+    //     let cover = and.wrapping_mul(mul);
+
+    //     Self { ror, and, mul, cover, ..Default::default() }
+    // }
 
     fn calc_cost(&mut self) {
         // fixme: determine whether mask can be elided by changing rotations to shifts
         println!("{self:?}\n");
 
-        let c_rol = if self.rol != 0 { 1 } else { 0 };
+        let c_sh1 = self.sh1.cost();
         let c_sar = if self.sar != 0 { 1 } else { 0 };
-        let c_ror = if self.ror != 0 { 1 } else { 0 };
-        let c_and = if self.and != !0 { 1 } else { 0 };
+        let c_sh2 = self.sh2.cost();
+        let c_and = if self.and != u64::MAX { 1 } else { 0 };
         let c_mul = match self.mul.count_ones() {
             0 => unsafe { unreachable_unchecked() },
             1 => 0, // no-op
@@ -223,19 +330,13 @@ impl BitExtract {
             _ => 3, // real multiply
         };
 
-        self.cost = [c_rol, c_sar, c_ror, c_and, c_mul].iter().sum();
+        self.cost = [c_sh1, c_sar, c_sh2, c_and, c_mul].iter().sum();
     }
 
     pub fn exec(self, value: u64) -> u64 {
-        let value = match self.shl {
-            false => value.rotate_left(self.rol as u32),
-            true => value.shl(self.rol as u32),
-        };
+        let value = self.sh1.exec(value);
         let value = (value as i64).shr(self.sar as u32) as u64;
-        let value = match self.shr {
-            false => value.rotate_right(self.ror as u32),
-            true => value.shr(self.ror as u32),
-        };
+        let value = self.sh2.exec(value);
         let value = value.wrapping_mul(self.mul);
         let value = value.bitand(self.and);
         value
@@ -244,39 +345,30 @@ impl BitExtract {
 
 impl std::fmt::Debug for BitExtract {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut sep = false;
-        let mut write_sep =
-            |f: &mut std::fmt::Formatter<'_>| match std::mem::replace(&mut sep, true) {
-                true => write!(f, ", "),
-                false => Ok(()),
-            };
-
-        if self.rol != 0 {
-            write_sep(f)?;
-            match self.shl {
-                false => write!(f, "shl {}", self.rol)?,
-                true => write!(f, "rol {}", self.rol)?,
-            }
-        }
-        if self.sar != 0 {
-            write_sep(f)?;
-            write!(f, "sar {}", self.sar)?;
-        }
-        if self.ror != 0 {
-            write_sep(f)?;
-            match self.shl {
-                false => write!(f, "shr {}", self.ror)?,
-                true => write!(f, "ror {}", self.ror)?,
-            }
-        }
-        if self.and != u64::MAX {
-            write_sep(f)?;
-            write!(f, "and {}", PrintBinary(self.and))?;
-        }
-        if self.mul != 1 {
-            write_sep(f)?;
-            write!(f, "mul {}", PrintBinary(self.mul))?;
-        }
+        match self.sh1 {
+            RotateOrShift::None => write!(f, "none"),
+            RotateOrShift::ShiftLeft(amt) => write!(f, "shl {amt}"),
+            RotateOrShift::ShiftRight(amt) => write!(f, "shr {amt}"),
+            RotateOrShift::RotateLeft(amt) => write!(f, "rol {amt}"),
+        }?;
+        match self.sar {
+            0 => write!(f, ", none"),
+            amt => write!(f, ", sar {amt}"),
+        }?;
+        match self.sh2 {
+            RotateOrShift::None => write!(f, ", none"),
+            RotateOrShift::ShiftLeft(amt) => write!(f, ", shl {amt}"),
+            RotateOrShift::ShiftRight(amt) => write!(f, ", shr {amt}"),
+            RotateOrShift::RotateLeft(amt) => write!(f, ", rol {amt}"),
+        }?;
+        match self.and {
+            u64::MAX => write!(f, ", none"),
+            amt => write!(f, ", and {}", PrintBinary(amt)),
+        }?;
+        match self.mul {
+            1 => write!(f, ", none"),
+            amt => write!(f, ", mul {}", PrintBinary(amt)),
+        }?;
         write!(f, " (cost = {})", self.cost)
     }
 }
