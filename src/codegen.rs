@@ -59,7 +59,7 @@ pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
     output
 }
 
-fn lower_bit_permutation(
+pub fn lower_bit_permutation(
     builder: &mut FunctionBuilder,
     src: Value,
     permutation: &BitPermutation,
@@ -143,65 +143,6 @@ mod test {
             },
         );
     }
-
-    fn test_u64_to_u64(
-        body: impl FnOnce(&mut FunctionBuilder, Value) -> Value,
-        tests: impl FnOnce(&dyn Fn(u64) -> u64),
-    ) {
-        use cranelift_codegen::ir::types::I64;
-        use cranelift_codegen::ir::{AbiParam, InstBuilder};
-        use cranelift_codegen::isa;
-        use cranelift_codegen::settings::{self, Configurable};
-        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-        use cranelift_jit::{JITBuilder, JITModule};
-        use cranelift_module::{Linkage, Module};
-
-        let mut flags = settings::builder();
-        flags.set("use_colocated_libcalls", "false").unwrap();
-        flags.set("is_pic", "false").unwrap();
-        flags.set("opt_level", "speed").unwrap();
-
-        let isa = isa::lookup(target_lexicon::Triple::host()).unwrap();
-        let isa = isa.finish(settings::Flags::new(flags)).unwrap();
-        let frontend_config = isa.frontend_config();
-
-        let jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        let mut module = JITModule::new(jit_builder);
-
-        let mut ctx = module.make_context();
-        ctx.func.signature.params.push(AbiParam::new(I64));
-        ctx.func.signature.returns.push(AbiParam::new(I64));
-        ctx.set_disasm(true);
-
-        let func_id = module
-            .declare_function("my_func", Linkage::Export, &ctx.func.signature)
-            .unwrap();
-
-        let mut fb_ctx = FunctionBuilderContext::new();
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-
-        let entry = builder.create_block();
-        builder.append_block_params_for_function_params(entry);
-        builder.switch_to_block(entry);
-        builder.seal_block(entry);
-
-        let arg = builder.block_params(entry)[0];
-        let result = body(&mut builder, arg);
-        builder.ins().return_(&[result]);
-
-        builder.finalize(frontend_config);
-
-        module.define_function(func_id, &mut ctx).unwrap();
-        module.clear_context(&mut ctx);
-
-        module.finalize_definitions().unwrap();
-        let code_ptr = module.get_finalized_function(func_id);
-        let func = unsafe { std::mem::transmute::<_, fn(u64) -> u64>(code_ptr) };
-
-        tests(&func);
-
-        unsafe { module.free_memory() };
-    }
 }
 
 struct Code(Vec<u8>);
@@ -222,4 +163,63 @@ impl std::fmt::Display for Code {
         }
         Ok(())
     }
+}
+
+pub fn test_u64_to_u64(
+    body: impl FnOnce(&mut FunctionBuilder, Value) -> Value,
+    tests: impl FnOnce(&dyn Fn(u64) -> u64),
+) {
+    use cranelift_codegen::ir::types::I64;
+    use cranelift_codegen::ir::{AbiParam, InstBuilder};
+    use cranelift_codegen::isa;
+    use cranelift_codegen::settings::{self, Configurable};
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_jit::{JITBuilder, JITModule};
+    use cranelift_module::{Linkage, Module};
+
+    let mut flags = settings::builder();
+    flags.set("use_colocated_libcalls", "false").unwrap();
+    flags.set("is_pic", "false").unwrap();
+    flags.set("opt_level", "speed").unwrap();
+
+    let isa = isa::lookup(target_lexicon::Triple::host()).unwrap();
+    let isa = isa.finish(settings::Flags::new(flags)).unwrap();
+    let frontend_config = isa.frontend_config();
+
+    let jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    let mut module = JITModule::new(jit_builder);
+
+    let mut ctx = module.make_context();
+    ctx.func.signature.params.push(AbiParam::new(I64));
+    ctx.func.signature.returns.push(AbiParam::new(I64));
+    ctx.set_disasm(true);
+
+    let func_id = module
+        .declare_function("my_func", Linkage::Export, &ctx.func.signature)
+        .unwrap();
+
+    let mut fb_ctx = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    builder.seal_block(entry);
+
+    let arg = builder.block_params(entry)[0];
+    let result = body(&mut builder, arg);
+    builder.ins().return_(&[result]);
+
+    builder.finalize(frontend_config);
+
+    module.define_function(func_id, &mut ctx).unwrap();
+    module.clear_context(&mut ctx);
+
+    module.finalize_definitions().unwrap();
+    let code_ptr = module.get_finalized_function(func_id);
+    let func = unsafe { std::mem::transmute::<_, fn(u64) -> u64>(code_ptr) };
+
+    tests(&func);
+
+    unsafe { module.free_memory() };
 }

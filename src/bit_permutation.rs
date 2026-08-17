@@ -15,9 +15,9 @@ use crate::playground::min_cost_cover;
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct BitPermutation {
-    pub len: u8,
-    pub fixed: u64,
-    pub rot_masks: FnvHashMap<u8, u64>,
+    len: u8,
+    fixed: u64,
+    rot_masks: FnvHashMap<u8, u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -28,6 +28,16 @@ pub enum BitPermutationPart {
     Slice { len: u8, src_pos: u8 },
     /// A single input bit, repeated `len` times
     Repeat { len: u8, src_pos: u8 },
+}
+
+impl BitPermutationPart {
+    pub fn trunc(self, max_len: u8) -> Self {
+        match self {
+            Self::Fixed { len, bits } => Self::Fixed { len: len.min(max_len), bits },
+            Self::Slice { len, src_pos } => Self::Slice { len: len.min(max_len), src_pos },
+            Self::Repeat { len, src_pos } => Self::Repeat { len: len.min(max_len), src_pos },
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -102,10 +112,16 @@ impl BitExtract {
 
     /// Optimises the `BitExtract` by fusing operations where possible.
     pub fn optimise(&mut self) {
-        // fixme: removing mask requires backwards traversal
+        // optimise using bit demands, iterating backwards
+        let mut dst_bits = u64::MAX;
+        for op in self.ops.iter_mut().rev() {
+            *op = op.optimise_backward(dst_bits);
+            dst_bits = op.calc_src_bits(dst_bits);
+        }
 
         self.ops.push(BitOp::nop());
 
+        // optimise forwards
         let mut curr = BitOp::nop();
         let mut dst_bits = u64::MAX;
 
@@ -116,13 +132,13 @@ impl BitExtract {
             // - other rotate/shift fusions?
 
             // Optimise and emit `curr`
-            curr = curr.optimise(dst_bits);
+            curr = curr.optimise_forward(dst_bits);
             dst_bits = curr.apply(dst_bits);
             std::mem::swap(op, &mut curr);
         }
 
         debug_assert!(curr.is_nop());
-        debug_assert_eq!(dst_bits, self.dst_bits);
+        // debug_assert_eq!(dst_bits, self.dst_bits);
 
         self.ops.retain(|op| !op.is_nop());
     }
@@ -207,12 +223,12 @@ impl BitOp {
         }
     }
 
-    /// Optimise the operation.
+    /// Optimise the operation, given the known input bits.
     ///
     /// `src_bits` specifies which bits in the input are guaranteed to be zero.
-    fn optimise(self, src_bits: u64) -> Self {
+    fn optimise_forward(self, src_bits: u64) -> Self {
         match self {
-            // If the source bits are all zero, every op has no effect
+            // If the input bits are all zero, every op has no effect
             _ if src_bits == 0 => Self::nop(),
             // An arithmetic right shift where the input's high bit
             // is known to be zero is equivalent to a logical right shift
@@ -222,10 +238,10 @@ impl BitOp {
             Self::RotateRight(0) => Self::nop(),
             Self::RotateRight(amt) if src_bits << (64 - amt) == 0 => Self::ShiftRight(amt),
             Self::RotateRight(amt) if src_bits >> amt == 0 => Self::ShiftLeft(64 - amt),
-            // A mask that clears bits that are already zero is redundant
-            Self::Mask(mask) if !mask & src_bits == 0 => Self::nop(),
-            // Check for bit copies that have no effect
-            Self::ShiftOr(_, _) | Self::Mul(_) if self.apply(src_bits) == src_bits => Self::nop(),
+            // There is no need to clear bits that are already zero
+            Self::Mask(mask) => Self::Mask(mask | !src_bits),
+            // Self::ShiftOr(_, _) => todo!(),
+            // Self::Mul(_) => todo!(),
             // Strength-reduce multiplication where possible
             Self::Mul(mask) => match mask.count_ones() {
                 0 => Self::Mask(0),
@@ -237,6 +253,41 @@ impl BitOp {
                 }
                 _ => self,
             },
+            // The operation can't be optimised
+            _ => self,
+        }
+    }
+
+    /// Optimise the operation, given the needed output bits.
+    ///
+    /// `dst_bits` specifies which bits in the output are actually needed.
+    fn optimise_backward(self, dst_bits: u64) -> Self {
+        match self {
+            // If none of the output bits are needed, the operation can be elided
+            _ if dst_bits == 0 => Self::nop(),
+            // // An arithmetic right shift where the input's high bit
+            // // is known to be zero is equivalent to a logical right shift
+            // Self::ArithRight(amt) if src_bits & high_bit() == 0 => Self::ShiftRight(amt),
+            // Try to reduce a rotation to a left or right shift,
+            // checking the degenerate zero case first to avoid a panic
+            Self::RotateRight(0) => Self::nop(),
+            Self::RotateRight(amt) if dst_bits >> (64 - amt) == 0 => Self::ShiftRight(amt),
+            Self::RotateRight(amt) if dst_bits << amt == 0 => Self::ShiftLeft(64 - amt),
+            // There is no need to clear bits that aren't consumed
+            Self::Mask(mask) => Self::Mask(mask | !dst_bits),
+            // Self::ShiftOr(_, _) => todo!(),
+            // Self::Mul(_) => todo!(),
+            // // Strength-reduce multiplication where possible
+            // Self::Mul(mask) => match mask.count_ones() {
+            //     0 => Self::Mask(0),
+            //     1 => Self::ShiftLeft(mask.trailing_zeros() as u8),
+            //     2 => {
+            //         let amt1 = mask.trailing_zeros() as u8;
+            //         let amt2 = (mask & (mask - 1)).trailing_zeros() as u8;
+            //         Self::ShiftOr(amt1, amt2)
+            //     }
+            //     _ => self,
+            // },
             // The operation can't be optimised
             _ => self,
         }
@@ -335,120 +386,6 @@ const fn high_bit() -> u64 {
     1u64.rotate_right(1)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct BitExtractOld {
-    /// Pre-shift
-    pub sh1: RotateOrShift,
-    /// Right arithmetic shift
-    pub sar: u8,
-    /// Post-shift
-    pub sh2: RotateOrShift,
-    /// Mask
-    pub and: u64,
-    /// Multiply
-    pub mul: u64,
-    /// The operation cost
-    pub cost: u8,
-    /// The covering mask
-    pub dst_bits: u64,
-}
-
-impl Default for BitExtractOld {
-    fn default() -> Self {
-        Self {
-            sh1: RotateOrShift::None,
-            sar: 0,
-            sh2: RotateOrShift::None,
-            and: u64::MAX,
-            mul: 1,
-            cost: 0,
-            dst_bits: 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RotateOrShift {
-    None,
-    ShiftLeft(u8),
-    ShiftRight(u8),
-    RotateLeft(u8),
-}
-
-impl RotateOrShift {
-    fn new_rol(rol: u8, dst_mask: u64) -> Self {
-        let rol = rol & 63;
-
-        if rol == 0 {
-            return Self::None;
-        }
-
-        let shl = Self::ShiftLeft(rol);
-        if dst_mask & shl.zero_bits() == 0 {
-            return shl;
-        }
-
-        let shr = Self::ShiftRight(64 - rol);
-        if dst_mask & shr.zero_bits() == 0 {
-            return shr;
-        }
-
-        Self::RotateLeft(rol)
-    }
-
-    fn new_ror(ror: u8, dst_mask: u64) -> Self {
-        Self::new_rol(64 - ror, dst_mask)
-    }
-
-    fn new_shl(shl: u8) -> Self {
-        match shl {
-            0 => Self::None,
-            _ => Self::ShiftLeft(shl),
-        }
-    }
-
-    fn new_shr(shr: u8) -> Self {
-        match shr {
-            0 => Self::None,
-            _ => Self::ShiftRight(shr),
-        }
-    }
-
-    fn zero_bits(self) -> u64 {
-        match self {
-            Self::None => 0,
-            Self::ShiftLeft(amt) => right_mask(amt),
-            Self::ShiftRight(amt) => left_mask(amt),
-            Self::RotateLeft(_) => 0,
-        }
-    }
-
-    fn net_rol(self) -> i32 {
-        match self {
-            Self::None => 0,
-            Self::ShiftLeft(shl) => shl as i32,
-            Self::ShiftRight(shr) => -(shr as i32),
-            Self::RotateLeft(rol) => rol as i32,
-        }
-    }
-
-    fn cost(self) -> u8 {
-        match self {
-            Self::None => 0,
-            _ => 1,
-        }
-    }
-
-    fn exec(self, value: u64) -> u64 {
-        match self {
-            Self::None => value,
-            Self::ShiftLeft(amt) => value << amt,
-            Self::ShiftRight(amt) => value >> amt,
-            Self::RotateLeft(amt) => value.rotate_left(amt as u32),
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct ShiftExtract {
     /// Left rotation
@@ -476,6 +413,10 @@ struct BroadcastExtract {
 impl BitPermutation {
     pub fn new() -> Self {
         Self { len: 0, fixed: 0, rot_masks: Default::default() }
+    }
+
+    pub fn len(&self) -> u8 {
+        self.len
     }
 
     pub fn push(&mut self, part: BitPermutationPart) {
@@ -578,12 +519,12 @@ impl BitPermutation {
         //     ));
         // }
 
-        println!("CANDIDATES");
-        println!("----------");
-        for candidate in &candidates {
-            println!("{candidate}");
-        }
-        println!("");
+        // println!("CANDIDATES");
+        // println!("----------");
+        // for candidate in &candidates {
+        //     println!("{candidate}");
+        // }
+        // println!("");
 
         // Find minimum cost
         let mut candidates = candidates;
@@ -592,12 +533,12 @@ impl BitPermutation {
             .map(|idx| std::mem::take(&mut candidates[idx]))
             .collect();
 
-        println!("CHOSEN EXTRACTS");
-        println!("----------");
-        for extract in &extracts {
-            println!("{extract}");
-        }
-        println!("");
+        // println!("CHOSEN EXTRACTS");
+        // println!("----------");
+        // for extract in &extracts {
+        //     println!("{extract}");
+        // }
+        // println!("");
 
         // todo: exploit known-zero bits (will need API to express)
 
@@ -614,125 +555,81 @@ impl BitPermutation {
     }
 }
 
-impl BitExtractOld {
-    fn new_shift(extract: ShiftExtract) -> Self {
-        let ShiftExtract { rol, dst_mask } = extract;
+// impl BitExtractOld {
+//     fn new_shift(extract: ShiftExtract) -> Self {
+//         let ShiftExtract { rol, dst_mask } = extract;
 
-        let sh1 = RotateOrShift::None;
-        let sar = 0;
-        let sh2 = RotateOrShift::new_rol(rol, dst_mask);
-        let and = match dst_mask | sh2.zero_bits() {
-            u64::MAX => u64::MAX,
-            _ => dst_mask,
-        };
-        let mul = 1;
-        let cost = 0;
-        let dst_bits = dst_mask;
+//         let sh1 = RotateOrShift::None;
+//         let sar = 0;
+//         let sh2 = RotateOrShift::new_rol(rol, dst_mask);
+//         let and = match dst_mask | sh2.zero_bits() {
+//             u64::MAX => u64::MAX,
+//             _ => dst_mask,
+//         };
+//         let mul = 1;
+//         let cost = 0;
+//         let dst_bits = dst_mask;
 
-        Self { sh1, sar, sh2, and, mul, cost, dst_bits }
-    }
+//         Self { sh1, sar, sh2, and, mul, cost, dst_bits }
+//     }
 
-    fn new_broadcast(extract: BroadcastExtract) -> Self {
-        let BroadcastExtract { src_pos, dst_mask } = extract;
+//     fn new_broadcast(extract: BroadcastExtract) -> Self {
+//         let BroadcastExtract { src_pos, dst_mask } = extract;
 
-        // todo: find ways to elide mask?
+//         // todo: find ways to elide mask?
 
-        let sh1 = RotateOrShift::new_shl(63 - src_pos);
-        let sar = (63 - dst_mask.trailing_zeros()) as u8;
-        let sh2 = RotateOrShift::None;
-        let and = dst_mask;
-        let mul = 1;
-        let cost = 0;
-        let dst_bits = dst_mask;
+//         let sh1 = RotateOrShift::new_shl(63 - src_pos);
+//         let sar = (63 - dst_mask.trailing_zeros()) as u8;
+//         let sh2 = RotateOrShift::None;
+//         let and = dst_mask;
+//         let mul = 1;
+//         let cost = 0;
+//         let dst_bits = dst_mask;
 
-        Self { sh1, sar, sh2, and, mul, cost, dst_bits }
-    }
+//         Self { sh1, sar, sh2, and, mul, cost, dst_bits }
+//     }
 
-    fn new_repeat(extract: RepeatExtract, shr: u8) -> Self {
-        let RepeatExtract { src_mask, rol_mask } = extract;
+//     fn new_repeat(extract: RepeatExtract, shr: u8) -> Self {
+//         let RepeatExtract { src_mask, rol_mask } = extract;
 
-        let sh1 = RotateOrShift::None;
-        let sar = 0;
-        let sh2 = RotateOrShift::new_shr(shr);
-        let and = src_mask.shr(shr);
-        let mul = rol_mask.rotate_left(shr as u32);
-        let cost = 0;
-        let dst_bits = and.wrapping_mul(mul);
+//         let sh1 = RotateOrShift::None;
+//         let sar = 0;
+//         let sh2 = RotateOrShift::new_shr(shr);
+//         let and = src_mask.shr(shr);
+//         let mul = rol_mask.rotate_left(shr as u32);
+//         let cost = 0;
+//         let dst_bits = and.wrapping_mul(mul);
 
-        Self { sh1, sar, sh2, and, mul, cost, dst_bits }
-    }
+//         Self { sh1, sar, sh2, and, mul, cost, dst_bits }
+//     }
 
-    fn try_new_shift_broadcast(shift: ShiftExtract, broadcast: BroadcastExtract) -> Option<Self> {
-        let ShiftExtract { rol, dst_mask: sh_dst_mask } = shift;
-        let BroadcastExtract { src_pos, dst_mask: bc_dst_mask } = broadcast;
+//     fn try_new_shift_broadcast(shift: ShiftExtract, broadcast: BroadcastExtract) -> Option<Self> {
+//         let ShiftExtract { rol, dst_mask: sh_dst_mask } = shift;
+//         let BroadcastExtract { src_pos, dst_mask: bc_dst_mask } = broadcast;
 
-        let dst_mask = sh_dst_mask | bc_dst_mask;
+//         let dst_mask = sh_dst_mask | bc_dst_mask;
 
-        // Broadcast determines initial rotation
-        let sh1 = RotateOrShift::new_rol(63 - src_pos, u64::MAX);
+//         // Broadcast determines initial rotation
+//         let sh1 = RotateOrShift::new_rol(63 - src_pos, u64::MAX);
 
-        // Shift determines final rotation, and therefore arithmetic shift distance
-        let sar_lz = bc_dst_mask
-            .rotate_right((src_pos + rol) as u32)
-            .leading_zeros();
-        let sar = (63 - sar_lz) as u8;
+//         // Shift determines final rotation, and therefore arithmetic shift distance
+//         let sar_lz = bc_dst_mask
+//             .rotate_right((src_pos + rol) as u32)
+//             .leading_zeros();
+//         let sar = (63 - sar_lz) as u8;
 
-        // Shift determines final rotation
-        let rol = (rol as i32) - sh1.net_rol() + (sar as i32);
-        let sh2 = RotateOrShift::new_rol((rol % 64) as u8, u64::MAX);
+//         // Shift determines final rotation
+//         let rol = (rol as i32) - sh1.net_rol() + (sar as i32);
+//         let sh2 = RotateOrShift::new_rol((rol % 64) as u8, u64::MAX);
 
-        let and = dst_mask;
-        let mul = 1;
-        let cost = 0;
-        let cover = dst_mask;
+//         let and = dst_mask;
+//         let mul = 1;
+//         let cost = 0;
+//         let cover = dst_mask;
 
-        Some(Self { sh1, sar, sh2, and, mul, cost, dst_bits: cover })
-    }
-
-    fn calc_cost(&mut self) {
-        unimplemented!()
-    }
-
-    pub fn exec(self, value: u64) -> u64 {
-        let value = self.sh1.exec(value);
-        let value = (value as i64).shr(self.sar as u32) as u64;
-        let value = self.sh2.exec(value);
-        let value = value.wrapping_mul(self.mul);
-        let value = value.bitand(self.and);
-        value
-    }
-}
-
-impl Debug for BitExtractOld {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.sh1 {
-            RotateOrShift::None => write!(f, "none"),
-            RotateOrShift::ShiftLeft(amt) => write!(f, "shl {amt}"),
-            RotateOrShift::ShiftRight(amt) => write!(f, "shr {amt}"),
-            RotateOrShift::RotateLeft(amt) => write!(f, "rol {amt}"),
-        }?;
-        match self.sar {
-            0 => write!(f, ", none"),
-            amt => write!(f, ", sar {amt}"),
-        }?;
-        match self.sh2 {
-            RotateOrShift::None => write!(f, ", none"),
-            RotateOrShift::ShiftLeft(amt) => write!(f, ", shl {amt}"),
-            RotateOrShift::ShiftRight(amt) => write!(f, ", shr {amt}"),
-            RotateOrShift::RotateLeft(amt) => write!(f, ", rol {amt}"),
-        }?;
-        match self.and {
-            u64::MAX => write!(f, ", none"),
-            amt => write!(f, ", and {}", PrintBinary(amt)),
-        }?;
-        match self.mul {
-            1 => write!(f, ", none"),
-            amt => write!(f, ", mul {}", PrintBinary(amt)),
-        }?;
-        write!(f, " (cost = {})", self.cost)?;
-        write!(f, "\ncover = {}", PrintBinary(self.dst_bits))
-    }
-}
+//         Some(Self { sh1, sar, sh2, and, mul, cost, dst_bits: cover })
+//     }
+// }
 
 struct PrintBinary(u64);
 
@@ -758,10 +655,11 @@ impl std::fmt::Display for PrintBinary {
 
 #[inline(always)]
 fn make_mask(pos: u8, len: u8) -> u64 {
-    if len == 0 {
-        return 0;
+    match (pos, len) {
+        (_, 0) => 0,
+        (0, 64) => u64::MAX,
+        _ => ((1 << len) - 1) << pos,
     }
-    ((1 << len) - 1) << pos
 }
 
 fn right_mask(len: u8) -> u64 {

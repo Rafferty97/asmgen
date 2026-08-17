@@ -3,9 +3,14 @@ use crate::codegen::compile_bit_permutation;
 
 mod bit_permutation;
 mod codegen;
+mod fuzzer;
 mod playground;
 
 fn main() {
+    fuzzer::fuzz();
+}
+
+fn main2() {
     let i_imm = BitPermutation::from_parts([
         BitPermutationPart::Slice { len: 12, src_pos: 20 },
         BitPermutationPart::Repeat { len: 20, src_pos: 31 },
