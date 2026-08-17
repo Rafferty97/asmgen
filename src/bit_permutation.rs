@@ -33,9 +33,18 @@ pub enum BitPermutationPart {
 impl BitPermutationPart {
     pub fn trunc(self, max_len: u8) -> Self {
         match self {
-            Self::Fixed { len, bits } => Self::Fixed { len: len.min(max_len), bits },
-            Self::Slice { len, src_pos } => Self::Slice { len: len.min(max_len), src_pos },
-            Self::Repeat { len, src_pos } => Self::Repeat { len: len.min(max_len), src_pos },
+            Self::Fixed { len, bits } => Self::Fixed {
+                len: len.min(max_len),
+                bits,
+            },
+            Self::Slice { len, src_pos } => Self::Slice {
+                len: len.min(max_len),
+                src_pos,
+            },
+            Self::Repeat { len, src_pos } => Self::Repeat {
+                len: len.min(max_len),
+                src_pos,
+            },
         }
     }
 }
@@ -68,6 +77,15 @@ pub enum BitOp {
     ShiftOr(u8, u8),
     /// Integer multiplication.
     Mul(u64),
+}
+
+/// Known and demanded bits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct KDBits {
+    /// Bits in the input known to be zero.
+    pub zeros: u64,
+    /// Bits in the output that are used.
+    pub used: u64,
 }
 
 impl BitExtract {
@@ -112,35 +130,49 @@ impl BitExtract {
 
     /// Optimises the `BitExtract` by fusing operations where possible.
     pub fn optimise(&mut self) {
-        // optimise using bit demands, iterating backwards
-        let mut dst_bits = u64::MAX;
-        for op in self.ops.iter_mut().rev() {
-            *op = op.optimise_backward(dst_bits);
-            dst_bits = op.calc_src_bits(dst_bits);
+        let mut kd_bits = Vec::<KDBits>::new();
+
+        // println!("ORIGINAL");
+        // for &op in &self.ops {
+        //     println!("    {op}");
+        // }
+
+        loop {
+            self.ops.retain(|op| !op.is_nop());
+            kd_bits.resize(self.ops.len(), Default::default());
+
+            // Forward pass
+            let mut zeros = 0;
+            for (index, &op) in self.ops.iter().enumerate() {
+                kd_bits[index].zeros = zeros;
+                zeros = op.calc_known_zeros(zeros);
+            }
+
+            // Reverse pass
+            let mut used = u64::MAX;
+            for (index, &op) in self.ops.iter().enumerate().rev() {
+                kd_bits[index].used = used;
+                used = op.calc_used_bits(used);
+            }
+
+            // Optimise instructions
+            let mut changed = false;
+            for (op, &kd_bits) in self.ops.iter_mut().zip(&kd_bits) {
+                let optimised = op.optimise(kd_bits);
+                changed |= optimised != *op;
+                *op = optimised;
+            }
+            // todo: fuse instructions
+
+            if !changed {
+                break;
+            }
         }
 
-        self.ops.push(BitOp::nop());
-
-        // optimise forwards
-        let mut curr = BitOp::nop();
-        let mut dst_bits = u64::MAX;
-
-        for op in &mut self.ops {
-            // todo: attempt to fuse `curr` with `op`
-            // - fuse adjacent rotations
-            // - fuse adjacent shifts in same direction
-            // - other rotate/shift fusions?
-
-            // Optimise and emit `curr`
-            curr = curr.optimise_forward(dst_bits);
-            dst_bits = curr.apply(dst_bits);
-            std::mem::swap(op, &mut curr);
-        }
-
-        debug_assert!(curr.is_nop());
-        // debug_assert_eq!(dst_bits, self.dst_bits);
-
-        self.ops.retain(|op| !op.is_nop());
+        // println!("OPTIMISED");
+        // for &op in &self.ops {
+        //     println!("    {op}");
+        // }
     }
 
     /// Returns the operations comprising this `BitExtract`.
@@ -177,7 +209,11 @@ impl BitExtract {
 
 impl Default for BitExtract {
     fn default() -> Self {
-        Self { ops: SmallVec::new(), dst_bits: u64::MAX, cost: Cell::new(0) }
+        Self {
+            ops: SmallVec::new(),
+            dst_bits: u64::MAX,
+            cost: Cell::new(0),
+        }
     }
 }
 
@@ -223,25 +259,25 @@ impl BitOp {
         }
     }
 
-    /// Optimise the operation, given the known input bits.
-    ///
-    /// `src_bits` specifies which bits in the input are guaranteed to be zero.
-    fn optimise_forward(self, src_bits: u64) -> Self {
+    /// Optimise the operation, given the known input bits and demanded output bits.
+    fn optimise(self, KDBits { zeros, used }: KDBits) -> Self {
         match self {
-            // If the input bits are all zero, every op has no effect
-            _ if src_bits == 0 => Self::nop(),
+            // If the input bits are all zero, no op has any effect
+            _ if zeros == u64::MAX => Self::nop(),
+            // If none of the output bits are needed, the operation can be elided
+            _ if used == 0 => Self::nop(),
             // An arithmetic right shift where the input's high bit
             // is known to be zero is equivalent to a logical right shift
-            Self::ArithRight(amt) if src_bits & high_bit() == 0 => Self::ShiftRight(amt),
+            Self::ArithRight(amt) if zeros & high_bit() != 0 => Self::ShiftRight(amt),
             // Try to reduce a rotation to a left or right shift,
             // checking the degenerate zero case first to avoid a panic
             Self::RotateRight(0) => Self::nop(),
-            Self::RotateRight(amt) if src_bits << (64 - amt) == 0 => Self::ShiftRight(amt),
-            Self::RotateRight(amt) if src_bits >> amt == 0 => Self::ShiftLeft(64 - amt),
-            // There is no need to clear bits that are already zero
-            Self::Mask(mask) => Self::Mask(mask | !src_bits),
-            // Self::ShiftOr(_, _) => todo!(),
-            // Self::Mul(_) => todo!(),
+            Self::RotateRight(amt) if !zeros << (64 - amt) == 0 => Self::ShiftRight(amt),
+            Self::RotateRight(amt) if !zeros >> amt == 0 => Self::ShiftLeft(64 - amt),
+            Self::RotateRight(amt) if used >> (64 - amt) == 0 => Self::ShiftRight(amt),
+            Self::RotateRight(amt) if used << amt == 0 => Self::ShiftLeft(64 - amt),
+            // There is no need to clear bits that are already zero or unused
+            Self::Mask(mask) => Self::Mask(mask | zeros | !used),
             // Strength-reduce multiplication where possible
             Self::Mul(mask) => match mask.count_ones() {
                 0 => Self::Mask(0),
@@ -268,13 +304,6 @@ impl BitOp {
             // // An arithmetic right shift where the input's high bit
             // // is known to be zero is equivalent to a logical right shift
             // Self::ArithRight(amt) if src_bits & high_bit() == 0 => Self::ShiftRight(amt),
-            // Try to reduce a rotation to a left or right shift,
-            // checking the degenerate zero case first to avoid a panic
-            Self::RotateRight(0) => Self::nop(),
-            Self::RotateRight(amt) if dst_bits >> (64 - amt) == 0 => Self::ShiftRight(amt),
-            Self::RotateRight(amt) if dst_bits << amt == 0 => Self::ShiftLeft(64 - amt),
-            // There is no need to clear bits that aren't consumed
-            Self::Mask(mask) => Self::Mask(mask | !dst_bits),
             // Self::ShiftOr(_, _) => todo!(),
             // Self::Mul(_) => todo!(),
             // // Strength-reduce multiplication where possible
@@ -305,21 +334,47 @@ impl BitOp {
         }
     }
 
-    /// Computes which source bits are used given `dst_bits`,
-    /// a mask denoting which destination bits are used.
-    fn calc_src_bits(self, dst_bits: u64) -> u64 {
+    /// Propagates known zero bits from input to output.
+    fn calc_known_zeros(self, input: u64) -> u64 {
         match self {
-            _ if dst_bits == 0 => 0,
-            Self::ShiftLeft(amt) => dst_bits >> amt,
-            Self::ShiftRight(amt) => dst_bits << amt,
-            Self::ArithRight(amt) => {
-                let needs_sign = dst_bits & left_mask(amt) != 0;
-                (dst_bits << amt) | needs_sign.then_some(high_bit()).unwrap_or(0)
+            Self::ShiftLeft(amt) => input << amt | right_mask(amt),
+            Self::ShiftRight(amt) => input >> amt | left_mask(amt),
+            Self::ArithRight(amt) => ((input as i64) >> amt) as u64,
+            Self::RotateRight(amt) => input.rotate_right(amt as u32),
+            Self::Mask(mask) => input | !mask,
+            Self::ShiftOr(a, b) => {
+                let a_mask = Self::ShiftLeft(a).calc_known_zeros(input);
+                let b_mask = Self::ShiftLeft(b).calc_known_zeros(input);
+                a_mask & b_mask
             }
-            Self::RotateRight(amt) => dst_bits.rotate_left(amt as u32),
-            Self::Mask(mask) => dst_bits & mask,
-            Self::ShiftOr(amt1, amt2) => (dst_bits >> amt1) | (dst_bits >> amt2),
-            Self::Mul(_) => u64::MAX >> dst_bits.leading_zeros(), // fixme: conservative but correct
+            Self::Mul(mask) => {
+                let trailing_zeros = input.trailing_ones() + mask.trailing_zeros();
+                let leading_zeros = input.leading_ones() + mask.leading_zeros();
+                let lo_mask = right_mask(trailing_zeros.min(64) as u8);
+                let hi_mask = left_mask(leading_zeros.saturating_sub(64) as u8);
+                lo_mask | hi_mask
+            }
+        }
+    }
+
+    /// Propagates demanded bits from output to input.
+    fn calc_used_bits(self, output: u64) -> u64 {
+        match self {
+            _ if output == 0 => 0,
+            Self::ShiftLeft(amt) => output >> amt,
+            Self::ShiftRight(amt) => output << amt,
+            Self::ArithRight(amt) => {
+                let needs_sign = output & left_mask(amt) != 0;
+                (output << amt) | needs_sign.then_some(high_bit()).unwrap_or(0)
+            }
+            Self::RotateRight(amt) => output.rotate_left(amt as u32),
+            Self::Mask(mask) => output & mask,
+            Self::ShiftOr(a, b) => {
+                let a_mask = Self::ShiftLeft(a).calc_used_bits(output);
+                let b_mask = Self::ShiftLeft(b).calc_used_bits(output);
+                a_mask & b_mask
+            }
+            Self::Mul(_) => u64::MAX >> output.leading_zeros(),
         }
     }
 
@@ -412,7 +467,11 @@ struct BroadcastExtract {
 
 impl BitPermutation {
     pub fn new() -> Self {
-        Self { len: 0, fixed: 0, rot_masks: Default::default() }
+        Self {
+            len: 0,
+            fixed: 0,
+            rot_masks: Default::default(),
+        }
     }
 
     pub fn len(&self) -> u8 {
@@ -716,7 +775,10 @@ fn find_smallest_cover(value: u64) -> Cover {
 
     let lz = value.leading_zeros() as u8;
     let tz = value.trailing_zeros() as u8;
-    Cover { pos: tz, len: 64 - tz - lz }
+    Cover {
+        pos: tz,
+        len: 64 - tz - lz,
+    }
 }
 
 #[cfg(test)]
@@ -744,7 +806,10 @@ mod test {
 
     #[test]
     fn test_permutation_mask_merge() {
-        let p1 = [BitPermutationPart::Slice { len: 10, src_pos: 4 }];
+        let p1 = [BitPermutationPart::Slice {
+            len: 10,
+            src_pos: 4,
+        }];
         let p2 = [
             BitPermutationPart::Slice { len: 5, src_pos: 4 },
             BitPermutationPart::Slice { len: 5, src_pos: 9 },
@@ -759,8 +824,14 @@ mod test {
     fn test_riscv_immediates() {
         // Decode permutations
         let i_imm = BitPermutation::from_parts([
-            BitPermutationPart::Slice { len: 12, src_pos: 20 },
-            BitPermutationPart::Repeat { len: 32, src_pos: 31 },
+            BitPermutationPart::Slice {
+                len: 12,
+                src_pos: 20,
+            },
+            BitPermutationPart::Repeat {
+                len: 32,
+                src_pos: 31,
+            },
         ]);
 
         // todo
