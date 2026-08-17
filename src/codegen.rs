@@ -53,7 +53,7 @@ pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
 
     module.define_function(func_id, &mut ctx).unwrap();
     let output = ctx.compiled_code().unwrap().code_buffer().to_vec();
-    let output = format!("{}", Code(output));
+    let output = format!("{}\n", Code(output));
 
     module.clear_context(&mut ctx);
     unsafe { module.free_memory() };
@@ -111,17 +111,22 @@ struct Code(Vec<u8>);
 
 impl std::fmt::Display for Code {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for offset in (0..self.0.len()).step_by(4) {
-            let ins = u32::from_le_bytes([
-                self.0[offset],
-                self.0[offset + 1],
-                self.0[offset + 2],
-                self.0[offset + 3],
-            ]);
-            match disarm64::decoder_full::decode(ins) {
-                Some(ins) => writeln!(f, "{ins}")?,
-                None => writeln!(f, "{{bad}}")?,
-            }
+        // for offset in (0..self.0.len()).step_by(4) {
+        //     let ins = u32::from_le_bytes([
+        //         self.0[offset],
+        //         self.0[offset + 1],
+        //         self.0[offset + 2],
+        //         self.0[offset + 3],
+        //     ]);
+        //     match disarm64::decoder_full::decode(ins) {
+        //         Some(ins) => writeln!(f, "{ins}")?,
+        //         None => writeln!(f, "{{bad}}")?,
+        //     }
+        // }
+        // Ok(())
+
+        for byte in &self.0 {
+            write!(f, "{byte:02x} ")?;
         }
         Ok(())
     }
