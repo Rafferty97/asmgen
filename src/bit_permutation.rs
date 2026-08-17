@@ -110,6 +110,15 @@ impl RotateOrShift {
         }
     }
 
+    fn net_rol(self) -> i32 {
+        match self {
+            Self::None => 0,
+            Self::ShiftLeft(shl) => shl as i32,
+            Self::ShiftRight(shr) => -(shr as i32),
+            Self::RotateLeft(rol) => rol as i32,
+        }
+    }
+
     fn cost(self) -> u8 {
         match self {
             Self::None => 0,
@@ -222,7 +231,7 @@ impl BitPermutation {
             candidates.push(BitExtract::new_broadcast(broadcast));
 
             for shift in &shifts {
-                // todo
+                candidates.extend(BitExtract::try_new_shift_broadcast(*shift, broadcast));
             }
         }
 
@@ -289,11 +298,8 @@ impl BitExtract {
 
         // todo: find ways to elide mask?
 
-        let sh1 = 63 - src_pos;
+        let sh1 = RotateOrShift::new_shl(63 - src_pos);
         let sar = (63 - dst_mask.trailing_zeros()) as u8;
-
-        let sh1 = RotateOrShift::new_shl(sh1);
-        let sar = sar;
         let sh2 = RotateOrShift::None;
         let and = dst_mask;
         let mul = 1;
@@ -315,6 +321,36 @@ impl BitExtract {
         let cover = and.wrapping_mul(mul);
 
         Self { sh1, sar, sh2, and, mul, cost, cover }
+    }
+
+    fn try_new_shift_broadcast(shift: ShiftExtract, broadcast: BroadcastExtract) -> Option<Self> {
+        let ShiftExtract { rol, dst_mask: sh_dst_mask } = shift;
+        let BroadcastExtract { src_pos, dst_mask: bc_dst_mask } = broadcast;
+
+        let dst_mask = sh_dst_mask | bc_dst_mask;
+
+        // fixme: optimise sh1 to shift if possible
+        // fixme: optimise sh2 to shift if possible
+
+        // Broadcast determines initial rotation
+        let sh1 = RotateOrShift::RotateLeft(63 - src_pos);
+
+        // Shift determines final rotation, and therefore arithmetic shift distance
+        let sar_lz = bc_dst_mask
+            .rotate_right((src_pos + rol) as u32)
+            .leading_zeros();
+        let sar = (63 - sar_lz) as u8;
+
+        // Shift determines final rotation
+        let rol = (rol as i32) - sh1.net_rol() + (sar as i32);
+        let sh2 = RotateOrShift::RotateLeft((rol % 64) as u8);
+
+        let and = dst_mask;
+        let mul = 1;
+        let cost = 0;
+        let cover = dst_mask;
+
+        Some(Self { sh1, sar, sh2, and, mul, cost, cover })
     }
 
     fn calc_cost(&mut self) {
