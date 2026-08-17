@@ -22,6 +22,7 @@ pub enum BitPermutationPart {
     Slice { len: u8, src_pos: u8, repeats: u8 },
 }
 
+// fixme: convert to generic pipeline, with simplifications and cost modelling done on-the-fly
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BitExtract {
     /// Pre-shift
@@ -198,6 +199,7 @@ impl BitPermutation {
         }
 
         // Generate candidates
+        // fixme: add debug info to trace where each candidate comes from
         let mut shifts = vec![];
         let mut broadcasts = vec![];
         let mut repeats = vec![];
@@ -333,7 +335,7 @@ impl BitExtract {
         // fixme: optimise sh2 to shift if possible
 
         // Broadcast determines initial rotation
-        let sh1 = RotateOrShift::RotateLeft(63 - src_pos);
+        let sh1 = RotateOrShift::new_rol(63 - src_pos, u64::MAX);
 
         // Shift determines final rotation, and therefore arithmetic shift distance
         let sar_lz = bc_dst_mask
@@ -343,7 +345,7 @@ impl BitExtract {
 
         // Shift determines final rotation
         let rol = (rol as i32) - sh1.net_rol() + (sar as i32);
-        let sh2 = RotateOrShift::RotateLeft((rol % 64) as u8);
+        let sh2 = RotateOrShift::new_rol((rol % 64) as u8, u64::MAX);
 
         let and = dst_mask;
         let mul = 1;
@@ -356,6 +358,7 @@ impl BitExtract {
     fn calc_cost(&mut self) {
         // fixme: determine whether mask can be elided by changing rotations to shifts
         // fixme: fix cost modelling for immediate instantiation
+        // fixme: fix cost modelling for subsequent shifts/rolls that can be fused
 
         let c_sh1 = self.sh1.cost();
         let c_sar = if self.sar != 0 { 1 } else { 0 };
@@ -373,7 +376,7 @@ impl BitExtract {
             (2, false) => 3, // two left shifts, bitwise or
             _ => 3,          // real multiply
         };
-        let c_or = 1;
+        let c_or = 1; // fixme: unless final operation is a rotate/shift
 
         self.cost = [c_sh1, c_sar, c_sh2_and, c_mul, c_or].iter().sum();
     }

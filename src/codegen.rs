@@ -103,6 +103,7 @@ fn lower_bit_extract(builder: &mut FunctionBuilder, value: Value, extract: BitEx
         mask => builder.ins().band_imm_u(value, mask as i64),
     };
 
+    // fixme: incorrect, as low bit isn't guaranteed to be 1 anymore
     let value = match extract.mul.count_ones() {
         0 => unsafe { unreachable_unchecked() },
         1 => value,
