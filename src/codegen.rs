@@ -19,6 +19,7 @@ pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
 
     let target = target_lexicon::Triple::host();
     // let target = target_lexicon::Triple::from_str("riscv64gc-unknown-unknown").unwrap();
+    // let target = target_lexicon::Triple::from_str("x86_64-unknown-unknown").unwrap();
     let isa = isa::lookup(target).unwrap();
     let isa = isa.finish(settings::Flags::new(flags)).unwrap();
     let frontend_config = isa.frontend_config();

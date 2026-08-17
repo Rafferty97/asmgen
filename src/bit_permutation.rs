@@ -91,6 +91,11 @@ impl BitExtract {
         self
     }
 
+    pub fn shr(mut self, amt: u8) -> Self {
+        self.push(BitOp::ShiftRight(amt));
+        self
+    }
+
     pub fn sar(mut self, amt: u8) -> Self {
         self.push(BitOp::ArithRight(amt));
         self
@@ -108,6 +113,11 @@ impl BitExtract {
 
     pub fn mask(mut self, mask: u64) -> Self {
         self.push(BitOp::And { mask, used: u64::MAX });
+        self
+    }
+
+    pub fn mul(mut self, mask: u64) -> Self {
+        self.push(BitOp::Mul(mask));
         self
     }
 
@@ -564,7 +574,18 @@ impl BitPermutation {
                     .mask(dst_mask)
                     .optimised()
             });
-        let candidates = shifts.chain(broadcasts).collect_vec();
+        let repeats = repeats
+            .into_iter()
+            .map(|RepeatExtract { src_mask, rol_mask }| {
+                // fixme: other rotations
+                let shr = 0;
+                BitExtract::new()
+                    .shr(shr)
+                    .mask(src_mask >> shr)
+                    .mul(rol_mask.rotate_left(shr as u32))
+                    .optimised()
+            });
+        let candidates = shifts.chain(broadcasts).chain(repeats).collect_vec();
 
         // // Generate candidates
 
@@ -628,53 +649,6 @@ impl BitPermutation {
 }
 
 // impl BitExtractOld {
-//     fn new_shift(extract: ShiftExtract) -> Self {
-//         let ShiftExtract { rol, dst_mask } = extract;
-
-//         let sh1 = RotateOrShift::None;
-//         let sar = 0;
-//         let sh2 = RotateOrShift::new_rol(rol, dst_mask);
-//         let and = match dst_mask | sh2.zero_bits() {
-//             u64::MAX => u64::MAX,
-//             _ => dst_mask,
-//         };
-//         let mul = 1;
-//         let cost = 0;
-//         let dst_bits = dst_mask;
-
-//         Self { sh1, sar, sh2, and, mul, cost, dst_bits }
-//     }
-
-//     fn new_broadcast(extract: BroadcastExtract) -> Self {
-//         let BroadcastExtract { src_pos, dst_mask } = extract;
-
-//         // todo: find ways to elide mask?
-
-//         let sh1 = RotateOrShift::new_shl(63 - src_pos);
-//         let sar = (63 - dst_mask.trailing_zeros()) as u8;
-//         let sh2 = RotateOrShift::None;
-//         let and = dst_mask;
-//         let mul = 1;
-//         let cost = 0;
-//         let dst_bits = dst_mask;
-
-//         Self { sh1, sar, sh2, and, mul, cost, dst_bits }
-//     }
-
-//     fn new_repeat(extract: RepeatExtract, shr: u8) -> Self {
-//         let RepeatExtract { src_mask, rol_mask } = extract;
-
-//         let sh1 = RotateOrShift::None;
-//         let sar = 0;
-//         let sh2 = RotateOrShift::new_shr(shr);
-//         let and = src_mask.shr(shr);
-//         let mul = rol_mask.rotate_left(shr as u32);
-//         let cost = 0;
-//         let dst_bits = and.wrapping_mul(mul);
-
-//         Self { sh1, sar, sh2, and, mul, cost, dst_bits }
-//     }
-
 //     fn try_new_shift_broadcast(shift: ShiftExtract, broadcast: BroadcastExtract) -> Option<Self> {
 //         let ShiftExtract { rol, dst_mask: sh_dst_mask } = shift;
 //         let BroadcastExtract { src_pos, dst_mask: bc_dst_mask } = broadcast;
@@ -735,11 +709,17 @@ fn make_mask(pos: u8, len: u8) -> u64 {
 }
 
 fn right_mask(len: u8) -> u64 {
-    (1 << len) - 1
+    match len {
+        64 => u64::MAX,
+        _ => (1 << len) - 1,
+    }
 }
 
 fn left_mask(len: u8) -> u64 {
-    !(u64::MAX >> len)
+    match len {
+        64 => u64::MAX,
+        _ => !(u64::MAX >> len),
+    }
 }
 
 fn is_right_mask(bits: u64) -> bool {
