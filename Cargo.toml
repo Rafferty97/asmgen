@@ -8,5 +8,6 @@ cranelift-codegen = { version = "0.134.3", features = ["riscv64", "x86"] }
 cranelift-frontend = "0.134.3"
 cranelift-jit = "0.134.3"
 cranelift-module = "0.134.3"
+disarm64 = "0.2.0"
 fnv = "1.0.7"
 target-lexicon = "0.13.5"

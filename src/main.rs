@@ -7,8 +7,8 @@ mod playground;
 
 fn main() {
     let i_imm = BitPermutation::new([
-        BitPermutationPart::Slice { len: 11, src_pos: 20, repeats: 1 },
-        BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 21 },
+        BitPermutationPart::Slice { len: 12, src_pos: 20, repeats: 1 },
+        BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 20 },
         BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 32 },
     ]);
 
@@ -18,6 +18,14 @@ fn main() {
     // let perm = BitPermutation::new([
     //     BitPermutationPart::Slice { len: 1, src_pos: 0, repeats: 16 },
     //     BitPermutationPart::Slice { len: 1, src_pos: 16, repeats: 16 },
+    // ]);
+
+    // let code = compile_bit_permutation(&perm);
+    // println!("{code}");
+
+    // let perm = BitPermutation::new([
+    //     BitPermutationPart::Slice { len: 16, src_pos: 10, repeats: 1 },
+    //     BitPermutationPart::Slice { len: 16, src_pos: 10, repeats: 1 },
     // ]);
 
     // let code = compile_bit_permutation(&perm);
