@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt::{Debug, Display};
-use std::ops::{BitAnd, Shr};
 use std::u64;
 
 use fnv::FnvHashMap;
@@ -33,18 +33,9 @@ pub enum BitPermutationPart {
 impl BitPermutationPart {
     pub fn trunc(self, max_len: u8) -> Self {
         match self {
-            Self::Fixed { len, bits } => Self::Fixed {
-                len: len.min(max_len),
-                bits,
-            },
-            Self::Slice { len, src_pos } => Self::Slice {
-                len: len.min(max_len),
-                src_pos,
-            },
-            Self::Repeat { len, src_pos } => Self::Repeat {
-                len: len.min(max_len),
-                src_pos,
-            },
+            Self::Fixed { len, bits } => Self::Fixed { len: len.min(max_len), bits },
+            Self::Slice { len, src_pos } => Self::Slice { len: len.min(max_len), src_pos },
+            Self::Repeat { len, src_pos } => Self::Repeat { len: len.min(max_len), src_pos },
         }
     }
 }
@@ -71,7 +62,8 @@ pub enum BitOp {
     /// Right rotation.
     RotateRight(u8),
     /// Bitwise AND.
-    Mask(u64),
+    /// It is an invariant that `!mask & !used == 0`.
+    And { mask: u64, used: u64 },
     /// Two shifts followed by a bitwise or;
     /// the smaller shift preceeds the larger shift, and may be zero.
     ShiftOr(u8, u8),
@@ -99,6 +91,11 @@ impl BitExtract {
         self
     }
 
+    pub fn sar(mut self, amt: u8) -> Self {
+        self.push(BitOp::ArithRight(amt));
+        self
+    }
+
     pub fn rol(mut self, amt: u8) -> Self {
         self.push(BitOp::RotateRight((64 - amt) % 64));
         self
@@ -110,7 +107,7 @@ impl BitExtract {
     }
 
     pub fn mask(mut self, mask: u64) -> Self {
-        self.push(BitOp::Mask(mask));
+        self.push(BitOp::And { mask, used: u64::MAX });
         self
     }
 
@@ -209,11 +206,7 @@ impl BitExtract {
 
 impl Default for BitExtract {
     fn default() -> Self {
-        Self {
-            ops: SmallVec::new(),
-            dst_bits: u64::MAX,
-            cost: Cell::new(0),
-        }
+        Self { ops: SmallVec::new(), dst_bits: u64::MAX, cost: Cell::new(0) }
     }
 }
 
@@ -246,13 +239,25 @@ impl BitOp {
         Self::ShiftLeft(0)
     }
 
+    pub fn validate(self) {
+        debug_assert!(match self {
+            Self::ShiftLeft(amt) => amt < 64,
+            Self::ShiftRight(amt) => amt < 64,
+            Self::ArithRight(amt) => amt < 64,
+            Self::RotateRight(amt) => amt < 64,
+            Self::And { mask, used } => !mask & !used == 0,
+            Self::ShiftOr(a, b) => a < b && b < 64,
+            Self::Mul(_) => true,
+        })
+    }
+
     fn is_nop(self) -> bool {
         match self {
             Self::ShiftLeft(0) => true,
             Self::ShiftRight(0) => true,
             Self::ArithRight(0) => true,
             Self::RotateRight(0) => true,
-            Self::Mask(u64::MAX) => true,
+            Self::And { mask: u64::MAX, .. } => true,
             Self::ShiftOr(0, 0) => true,
             Self::Mul(1) => true,
             _ => false,
@@ -261,7 +266,7 @@ impl BitOp {
 
     /// Optimise the operation, given the known input bits and demanded output bits.
     fn optimise(self, KDBits { zeros, used }: KDBits) -> Self {
-        match self {
+        let result = match self {
             // If the input bits are all zero, no op has any effect
             _ if zeros == u64::MAX => Self::nop(),
             // If none of the output bits are needed, the operation can be elided
@@ -277,10 +282,12 @@ impl BitOp {
             Self::RotateRight(amt) if used >> (64 - amt) == 0 => Self::ShiftRight(amt),
             Self::RotateRight(amt) if used << amt == 0 => Self::ShiftLeft(64 - amt),
             // There is no need to clear bits that are already zero or unused
-            Self::Mask(mask) => Self::Mask(mask | zeros | !used),
+            Self::And { mask, .. } => {
+                let used = used & !zeros;
+                Self::And { mask: mask | !used, used }
+            }
             // Strength-reduce multiplication where possible
             Self::Mul(mask) => match mask.count_ones() {
-                0 => Self::Mask(0),
                 1 => Self::ShiftLeft(mask.trailing_zeros() as u8),
                 2 => {
                     let amt1 = mask.trailing_zeros() as u8;
@@ -291,7 +298,9 @@ impl BitOp {
             },
             // The operation can't be optimised
             _ => self,
-        }
+        };
+        result.validate();
+        result
     }
 
     /// Optimise the operation, given the needed output bits.
@@ -328,7 +337,7 @@ impl BitOp {
             Self::ShiftRight(amt) => value >> amt,
             Self::ArithRight(amt) => ((value as i64) >> amt) as u64,
             Self::RotateRight(amt) => value.rotate_right(amt as u32),
-            Self::Mask(mask) => value & mask,
+            Self::And { mask, .. } => value & mask,
             Self::ShiftOr(amt1, amt2) => (value << amt1) | (value << amt2),
             Self::Mul(mask) => value.wrapping_mul(mask),
         }
@@ -341,7 +350,7 @@ impl BitOp {
             Self::ShiftRight(amt) => input >> amt | left_mask(amt),
             Self::ArithRight(amt) => ((input as i64) >> amt) as u64,
             Self::RotateRight(amt) => input.rotate_right(amt as u32),
-            Self::Mask(mask) => input | !mask,
+            Self::And { mask, .. } => input | !mask,
             Self::ShiftOr(a, b) => {
                 let a_mask = Self::ShiftLeft(a).calc_known_zeros(input);
                 let b_mask = Self::ShiftLeft(b).calc_known_zeros(input);
@@ -368,7 +377,7 @@ impl BitOp {
                 (output << amt) | needs_sign.then_some(high_bit()).unwrap_or(0)
             }
             Self::RotateRight(amt) => output.rotate_left(amt as u32),
-            Self::Mask(mask) => output & mask,
+            Self::And { mask, .. } => output & mask,
             Self::ShiftOr(a, b) => {
                 let a_mask = Self::ShiftLeft(a).calc_used_bits(output);
                 let b_mask = Self::ShiftLeft(b).calc_used_bits(output);
@@ -386,12 +395,13 @@ impl BitOp {
         // fixme: account for instruction fusion
         // - shift and mask -> `ubfx` or `pext`
         // - others?
+        // or: just model the fused ops directly?
         match self {
             Self::ShiftLeft(_) => 1,
             Self::ShiftRight(_) => 1,
             Self::ArithRight(_) => 1,
             Self::RotateRight(_) => 1,
-            Self::Mask(_) => 1,
+            Self::And { .. } => 1,
             Self::ShiftOr(0, _) => 2, // fixme: depends on arch, for ARM this is 1
             Self::ShiftOr(_, _) => 3, // fixme: depends on arch, for ARM this is 2
             Self::Mul(_) => 3,
@@ -423,7 +433,7 @@ impl Display for BitOp {
                 33..63 => write!(f, "rol {}", 64 - amt),
                 _ => write!(f, "ror {amt}"),
             },
-            Self::Mask(mask) => write!(f, "and {}", PrintBinary(mask)),
+            Self::And { mask, used } => write!(f, "and {}", PrintBinary(mask & used)),
             Self::ShiftOr(0, amt) => write!(f, "or (shl {amt})"),
             Self::ShiftOr(amt1, amt2) => write!(f, "shl {amt1}, or (shl {})", amt2 - amt1), // fixme
             Self::Mul(mask) => write!(f, "mul {}", PrintBinary(mask)),
@@ -467,11 +477,7 @@ struct BroadcastExtract {
 
 impl BitPermutation {
     pub fn new() -> Self {
-        Self {
-            len: 0,
-            fixed: 0,
-            rot_masks: Default::default(),
-        }
+        Self { len: 0, fixed: 0, rot_masks: Default::default() }
     }
 
     pub fn len(&self) -> u8 {
@@ -510,6 +516,8 @@ impl BitPermutation {
     }
 
     pub fn compile(&self) -> (u64, Vec<BitExtract>) {
+        // fixme: add debug info to trace where each candidate comes from
+
         // Generate shift candidates
         let shifts = self
             .rot_masks
@@ -520,40 +528,45 @@ impl BitPermutation {
             })
             .collect_vec();
 
-        let candidates = shifts
+        // Merge rotation groups with identical source masks
+        let mut groups = HashMap::new();
+        for (&rol, &src_mask) in &self.rot_masks {
+            *groups.entry(src_mask).or_insert(0) |= 1u64 << rol;
+        }
+
+        // Generate broadcast and repeat candidates
+        let mut broadcasts = vec![];
+        let mut repeats = vec![];
+
+        for (src_mask, rol_mask) in groups {
+            if rol_mask.count_ones() < 2 {
+                continue;
+            }
+            if src_mask.count_ones() == 1 {
+                let src_pos = src_mask.trailing_zeros() as u8;
+                let dst_mask = rol_mask.rotate_left(src_pos as u32);
+                broadcasts.push(BroadcastExtract { src_pos, dst_mask });
+            } else {
+                repeats.push(RepeatExtract { src_mask, rol_mask });
+            }
+        }
+
+        // Merge candidates
+        let shifts = shifts.into_iter().map(|ShiftExtract { rol, dst_mask }| {
+            BitExtract::new().rol(rol).mask(dst_mask).optimised()
+        });
+        let broadcasts = broadcasts
             .into_iter()
-            .map(|ShiftExtract { rol, dst_mask }| {
-                BitExtract::new().rol(rol).mask(dst_mask).optimised()
-            })
-            .collect_vec();
-
-        // // Generate broadcast candidates
-
-        // // Join rotation groups with identical source masks
-        // let mut groups = HashMap::new();
-        // for (&rol, &src_mask) in &self.rot_masks {
-        //     *groups.entry(src_mask).or_insert(0) |= 1u64 << rol;
-        // }
+            .map(|BroadcastExtract { src_pos, dst_mask }| {
+                BitExtract::new()
+                    .shl(63 - src_pos)
+                    .sar((63 - dst_mask.trailing_zeros()) as u8)
+                    .mask(dst_mask)
+                    .optimised()
+            });
+        let candidates = shifts.chain(broadcasts).collect_vec();
 
         // // Generate candidates
-        // // fixme: add debug info to trace where each candidate comes from
-        // let mut broadcasts = vec![];
-        // let mut repeats = vec![];
-
-        // for (src_mask, rol_mask) in groups {
-        //     let one_bit_src = src_mask.count_ones() == 1;
-        //     let multi_bit_dst = rol_mask.count_ones() > 1;
-
-        //     if one_bit_src && multi_bit_dst {
-        //         let src_pos = src_mask.trailing_zeros() as u8;
-        //         let dst_mask = rol_mask.rotate_left(src_pos as u32);
-        //         broadcasts.push(BroadcastExtract { src_pos, dst_mask });
-        //     } else {
-        //         if multi_bit_dst {
-        //             repeats.push(RepeatExtract { src_mask, rol_mask });
-        //         }
-        //     }
-        // }
 
         // let mut candidates = vec![];
 
@@ -592,7 +605,7 @@ impl BitPermutation {
             .map(|idx| std::mem::take(&mut candidates[idx]))
             .collect();
 
-        // println!("CHOSEN EXTRACTS");
+        // println!("EXTRACTS");
         // println!("----------");
         // for extract in &extracts {
         //     println!("{extract}");
@@ -775,10 +788,7 @@ fn find_smallest_cover(value: u64) -> Cover {
 
     let lz = value.leading_zeros() as u8;
     let tz = value.trailing_zeros() as u8;
-    Cover {
-        pos: tz,
-        len: 64 - tz - lz,
-    }
+    Cover { pos: tz, len: 64 - tz - lz }
 }
 
 #[cfg(test)]
@@ -806,10 +816,7 @@ mod test {
 
     #[test]
     fn test_permutation_mask_merge() {
-        let p1 = [BitPermutationPart::Slice {
-            len: 10,
-            src_pos: 4,
-        }];
+        let p1 = [BitPermutationPart::Slice { len: 10, src_pos: 4 }];
         let p2 = [
             BitPermutationPart::Slice { len: 5, src_pos: 4 },
             BitPermutationPart::Slice { len: 5, src_pos: 9 },
@@ -824,14 +831,8 @@ mod test {
     fn test_riscv_immediates() {
         // Decode permutations
         let i_imm = BitPermutation::from_parts([
-            BitPermutationPart::Slice {
-                len: 12,
-                src_pos: 20,
-            },
-            BitPermutationPart::Repeat {
-                len: 32,
-                src_pos: 31,
-            },
+            BitPermutationPart::Slice { len: 12, src_pos: 20 },
+            BitPermutationPart::Repeat { len: 32, src_pos: 31 },
         ]);
 
         // todo

@@ -90,7 +90,7 @@ fn lower_bit_op(builder: &mut FunctionBuilder, value: Value, op: BitOp) -> Value
         BitOp::ShiftRight(amt) => builder.ins().ushr_imm_u(value, amt as i64),
         BitOp::ArithRight(amt) => builder.ins().sshr_imm_u(value, amt as i64),
         BitOp::RotateRight(amt) => builder.ins().rotr_imm_u(value, amt as i64),
-        BitOp::Mask(mask) => builder.ins().band_imm_u(value, mask as i64),
+        BitOp::And { mask, used } => builder.ins().band_imm_u(value, (mask & used) as i64), // fixme: not always optimal
         BitOp::ShiftOr(0, amt) => {
             let shifted = builder.ins().ishl_imm_u(value, amt as i64);
             builder.ins().bor(value, shifted)
