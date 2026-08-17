@@ -6,18 +6,18 @@ mod codegen;
 mod playground;
 
 fn main() {
-    let i_imm = BitPermutation::new([
-        BitPermutationPart::Slice { len: 12, src_pos: 20, repeats: 1 },
-        BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 20 },
-        BitPermutationPart::Slice { len: 1, src_pos: 31, repeats: 32 },
+    let i_imm = BitPermutation::from_parts([
+        BitPermutationPart::Slice { len: 12, src_pos: 20 },
+        BitPermutationPart::Repeat { len: 20, src_pos: 31 },
+        BitPermutationPart::Repeat { len: 32, src_pos: 31 },
     ]);
 
     let code = compile_bit_permutation(&i_imm);
     println!("{code}");
 
-    let perm = BitPermutation::new([
-        BitPermutationPart::Slice { len: 1, src_pos: 0, repeats: 16 },
-        BitPermutationPart::Slice { len: 1, src_pos: 16, repeats: 16 },
+    let perm = BitPermutation::from_parts([
+        BitPermutationPart::Repeat { len: 16, src_pos: 0 },
+        BitPermutationPart::Repeat { len: 16, src_pos: 16 },
     ]);
     // extr		x3, x0, x0, #32
     // sbfm		x0, x3, #52, #63
@@ -32,9 +32,9 @@ fn main() {
     // madd		x0, x6, x7, xzr
     // ret		x30
 
-    let perm = BitPermutation::new([
-        BitPermutationPart::Slice { len: 16, src_pos: 10, repeats: 1 },
-        BitPermutationPart::Slice { len: 16, src_pos: 10, repeats: 1 },
+    let perm = BitPermutation::from_parts([
+        BitPermutationPart::Slice { len: 16, src_pos: 10 },
+        BitPermutationPart::Slice { len: 16, src_pos: 10 },
     ]);
 
     let code = compile_bit_permutation(&perm);

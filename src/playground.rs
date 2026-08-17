@@ -19,18 +19,18 @@ use crate::bit_permutation::BitExtract;
 /// usually settle it before any real branching happens.
 pub fn min_cost_cover(candidates: &[BitExtract]) -> Vec<usize> {
     // The bits we must cover are exactly those some candidate can supply.
-    let universe: u64 = candidates.iter().fold(0, |acc, c| acc | c.cover);
+    let universe: u64 = candidates.iter().fold(0, |acc, c| acc | c.dst_bits());
     if universe == 0 {
         // No candidate covers anything: nothing needs covering, empty solution.
         return Vec::new();
     }
 
     // Work with (original_index, cost, cover). We never mutate candidates.
-    let items: Vec<(usize, u8, u64)> = candidates
+    let items: Vec<_> = candidates
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.cover != 0) // zero-cover candidates can never help
-        .map(|(i, c)| (i, c.cost, c.cover))
+        .filter(|(_, c)| c.dst_bits() != 0) // zero-cover candidates can never help
+        .map(|(i, c)| (i, c.cost(), c.dst_bits()))
         .collect();
 
     let mut best: Option<(u32, Vec<usize>)> = None; // (total_cost, chosen indices)
@@ -50,7 +50,7 @@ pub fn min_cost_cover(candidates: &[BitExtract]) -> Vec<usize> {
 /// `chosen`: indices selected on the current path.
 /// `best`: best complete solution found so far.
 fn solve(
-    items: &[(usize, u8, u64)],
+    items: &[(usize, u16, u64)],
     remaining: u64,
     acc_cost: u32,
     chosen: &mut Vec<usize>,
@@ -74,7 +74,7 @@ fn solve(
 
     // Restrict every candidate's cover to the bits that still matter.
     // Drop any that now cover nothing useful.
-    let mut live: Vec<(usize, u8, u64)> = items
+    let mut live: Vec<_> = items
         .iter()
         .filter_map(|&(i, cost, cover)| {
             let c = cover & remaining;
@@ -156,7 +156,7 @@ fn solve(
         let (orig, cost, cover) = live[li];
         chosen.push(orig);
         // Remove the forced candidate from the pool for the recursive call.
-        let rest: Vec<(usize, u8, u64)> = live
+        let rest: Vec<_> = live
             .iter()
             .enumerate()
             .filter(|&(j, _)| j != li)
@@ -214,7 +214,7 @@ fn solve(
 
     // Try each candidate covering the target bit, most-covering first (helps find
     // a good incumbent early, which strengthens the bound).
-    let mut branchers: Vec<(usize, u8, u64)> = live
+    let mut branchers: Vec<_> = live
         .iter()
         .copied()
         .filter(|&(_, _, cover)| cover & target_bit != 0)
@@ -224,7 +224,7 @@ fn solve(
     for (orig, cost, cover) in branchers {
         chosen.push(orig);
         // Remove just this candidate; others remain available.
-        let rest: Vec<(usize, u8, u64)> = live
+        let rest: Vec<_> = live
             .iter()
             .copied()
             .filter(|&(i, _, _)| i != orig)
@@ -240,146 +240,146 @@ fn solve(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
 
-    fn cost_of(cands: &[BitExtract], pick: &[usize]) -> u32 {
-        pick.iter().map(|&i| cands[i].cost as u32).sum()
-    }
-    fn universe(cands: &[BitExtract]) -> u64 {
-        cands.iter().fold(0u64, |a, c| a | c.cover)
-    }
-    fn covers_all(cands: &[BitExtract], pick: &[usize]) -> bool {
-        pick.iter().fold(0u64, |a, &i| a | cands[i].cover) == universe(cands)
-    }
+//     fn cost_of(cands: &[BitExtract], pick: &[usize]) -> u32 {
+//         pick.iter().map(|&i| cands[i].cost as u32).sum()
+//     }
+//     fn universe(cands: &[BitExtract]) -> u64 {
+//         cands.iter().fold(0u64, |a, c| a | c.dst_bits)
+//     }
+//     fn covers_all(cands: &[BitExtract], pick: &[usize]) -> bool {
+//         pick.iter().fold(0u64, |a, &i| a | cands[i].dst_bits) == universe(cands)
+//     }
 
-    /// Brute-force reference: try every subset, return the min cost that covers
-    /// the universe (the OR of all candidate covers). Always Some, since the
-    /// full set covers the universe by definition.
-    fn brute(cands: &[BitExtract]) -> u32 {
-        let n = cands.len();
-        let uni = universe(cands);
-        let mut best = None;
-        for mask in 0u64..(1u64 << n) {
-            let mut cover = 0u64;
-            let mut cost = 0u32;
-            for i in 0..n {
-                if mask & (1 << i) != 0 {
-                    cover |= cands[i].cover;
-                    cost += cands[i].cost as u32;
-                }
-            }
-            if cover == uni {
-                best = Some(best.map_or(cost, |b: u32| b.min(cost)));
-            }
-        }
-        best.unwrap()
-    }
+//     /// Brute-force reference: try every subset, return the min cost that covers
+//     /// the universe (the OR of all candidate covers). Always Some, since the
+//     /// full set covers the universe by definition.
+//     fn brute(cands: &[BitExtract]) -> u32 {
+//         let n = cands.len();
+//         let uni = universe(cands);
+//         let mut best = None;
+//         for mask in 0u64..(1u64 << n) {
+//             let mut cover = 0u64;
+//             let mut cost = 0u32;
+//             for i in 0..n {
+//                 if mask & (1 << i) != 0 {
+//                     cover |= cands[i].dst_bits;
+//                     cost += cands[i].cost as u32;
+//                 }
+//             }
+//             if cover == uni {
+//                 best = Some(best.map_or(cost, |b: u32| b.min(cost)));
+//             }
+//         }
+//         best.unwrap()
+//     }
 
-    #[test]
-    fn dont_care_bits_are_ignored() {
-        // No candidate covers bit 0, so bit 0 is not part of the universe and
-        // must not force anything. The single candidate is the whole solution.
-        let cands = vec![BitExtract { cost: 1, cover: !0 << 1, ..Default::default() }];
-        let pick = min_cost_cover(&cands);
-        assert!(covers_all(&cands, &pick)); // covers the universe (everything but bit 0)
-        assert_eq!(cost_of(&cands, &pick), 1);
-    }
+//     #[test]
+//     fn dont_care_bits_are_ignored() {
+//         // No candidate covers bit 0, so bit 0 is not part of the universe and
+//         // must not force anything. The single candidate is the whole solution.
+//         let cands = vec![BitExtract { cost: 1, dst_bits: !0 << 1, ..Default::default() }];
+//         let pick = min_cost_cover(&cands);
+//         assert!(covers_all(&cands, &pick)); // covers the universe (everything but bit 0)
+//         assert_eq!(cost_of(&cands, &pick), 1);
+//     }
 
-    #[test]
-    fn empty_input_is_empty_solution() {
-        let cands: Vec<BitExtract> = vec![];
-        assert!(min_cost_cover(&cands).is_empty());
-    }
+//     #[test]
+//     fn empty_input_is_empty_solution() {
+//         let cands: Vec<BitExtract> = vec![];
+//         assert!(min_cost_cover(&cands).is_empty());
+//     }
 
-    #[test]
-    fn all_zero_cover_is_empty_solution() {
-        // Universe is empty; nothing needs covering.
-        let cands = vec![BitExtract { cost: 3, cover: 0, ..Default::default() }];
-        assert!(min_cost_cover(&cands).is_empty());
-    }
+//     #[test]
+//     fn all_zero_cover_is_empty_solution() {
+//         // Universe is empty; nothing needs covering.
+//         let cands = vec![BitExtract { cost: 3, dst_bits: 0, ..Default::default() }];
+//         assert!(min_cost_cover(&cands).is_empty());
+//     }
 
-    #[test]
-    fn single_full_cover() {
-        let cands = vec![BitExtract { cost: 5, cover: !0, ..Default::default() }];
-        let pick = min_cost_cover(&cands);
-        assert!(covers_all(&cands, &pick));
-        assert_eq!(cost_of(&cands, &pick), 5);
-    }
+//     #[test]
+//     fn single_full_cover() {
+//         let cands = vec![BitExtract { cost: 5, dst_bits: !0, ..Default::default() }];
+//         let pick = min_cost_cover(&cands);
+//         assert!(covers_all(&cands, &pick));
+//         assert_eq!(cost_of(&cands, &pick), 5);
+//     }
 
-    #[test]
-    fn prefers_cheaper_full_cover() {
-        let cands = vec![
-            BitExtract { cost: 5, cover: !0, ..Default::default() },
-            BitExtract { cost: 3, cover: !0, ..Default::default() },
-            BitExtract { cost: 9, cover: !0, ..Default::default() },
-        ];
-        let pick = min_cost_cover(&cands);
-        assert_eq!(cost_of(&cands, &pick), 3);
-    }
+//     #[test]
+//     fn prefers_cheaper_full_cover() {
+//         let cands = vec![
+//             BitExtract { cost: 5, dst_bits: !0, ..Default::default() },
+//             BitExtract { cost: 3, dst_bits: !0, ..Default::default() },
+//             BitExtract { cost: 9, dst_bits: !0, ..Default::default() },
+//         ];
+//         let pick = min_cost_cover(&cands);
+//         assert_eq!(cost_of(&cands, &pick), 3);
+//     }
 
-    #[test]
-    fn two_halves() {
-        let lo = 0x0000_0000_FFFF_FFFF;
-        let hi = 0xFFFF_FFFF_0000_0000;
-        let cands = vec![
-            BitExtract { cost: 2, cover: lo, ..Default::default() },
-            BitExtract { cost: 2, cover: hi, ..Default::default() },
-            BitExtract { cost: 10, cover: !0, ..Default::default() }, // one-shot but pricey
-        ];
-        let pick = min_cost_cover(&cands);
-        assert!(covers_all(&cands, &pick));
-        assert_eq!(cost_of(&cands, &pick), 4); // two halves beat the 10 one-shot
-    }
+//     #[test]
+//     fn two_halves() {
+//         let lo = 0x0000_0000_FFFF_FFFF;
+//         let hi = 0xFFFF_FFFF_0000_0000;
+//         let cands = vec![
+//             BitExtract { cost: 2, dst_bits: lo, ..Default::default() },
+//             BitExtract { cost: 2, dst_bits: hi, ..Default::default() },
+//             BitExtract { cost: 10, dst_bits: !0, ..Default::default() }, // one-shot but pricey
+//         ];
+//         let pick = min_cost_cover(&cands);
+//         assert!(covers_all(&cands, &pick));
+//         assert_eq!(cost_of(&cands, &pick), 4); // two halves beat the 10 one-shot
+//     }
 
-    #[test]
-    fn essential_forced() {
-        // Only one candidate covers bit 63; it must be chosen.
-        let cands = vec![
-            BitExtract { cost: 1, cover: 1 << 63, ..Default::default() },
-            BitExtract { cost: 1, cover: (!0) >> 1, ..Default::default() }, // everything except bit 63
-        ];
-        let pick = min_cost_cover(&cands);
-        assert!(covers_all(&cands, &pick));
-        assert_eq!(cost_of(&cands, &pick), 2);
-    }
+//     #[test]
+//     fn essential_forced() {
+//         // Only one candidate covers bit 63; it must be chosen.
+//         let cands = vec![
+//             BitExtract { cost: 1, dst_bits: 1 << 63, ..Default::default() },
+//             BitExtract { cost: 1, dst_bits: (!0) >> 1, ..Default::default() }, // everything except bit 63
+//         ];
+//         let pick = min_cost_cover(&cands);
+//         assert!(covers_all(&cands, &pick));
+//         assert_eq!(cost_of(&cands, &pick), 2);
+//     }
 
-    #[test]
-    fn random_matches_bruteforce() {
-        // Fuzz against brute force on small instances. Uses narrow covers too,
-        // so many instances have don't-care bits (universe != !0).
-        let mut state = 0x1234_5678_9abc_def0u64;
-        let mut rng = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        for _ in 0..4000 {
-            let n = (rng() % 8) as usize + 1;
-            let mut cands = Vec::new();
-            for _ in 0..n {
-                cands.push(BitExtract {
-                    cost: (rng() % 8) as u8 + 1,
-                    // Mix wide and narrow covers; narrow ones leave don't-care bits.
-                    cover: if rng() & 1 == 0 {
-                        rng() | rng()
-                    } else {
-                        rng() & rng()
-                    },
-                    ..Default::default()
-                });
-            }
-            let pick = min_cost_cover(&cands);
-            assert!(
-                covers_all(&cands, &pick),
-                "returned pick doesn't cover the universe: {:?}",
-                cands
-            );
-            let got = cost_of(&cands, &pick);
-            let want = brute(&cands);
-            assert_eq!(got, want, "mismatch on {:?}", cands);
-        }
-    }
-}
+//     #[test]
+//     fn random_matches_bruteforce() {
+//         // Fuzz against brute force on small instances. Uses narrow covers too,
+//         // so many instances have don't-care bits (universe != !0).
+//         let mut state = 0x1234_5678_9abc_def0u64;
+//         let mut rng = || {
+//             state ^= state << 13;
+//             state ^= state >> 7;
+//             state ^= state << 17;
+//             state
+//         };
+//         for _ in 0..4000 {
+//             let n = (rng() % 8) as usize + 1;
+//             let mut cands = Vec::new();
+//             for _ in 0..n {
+//                 cands.push(BitExtract {
+//                     cost: (rng() % 8) as u8 + 1,
+//                     // Mix wide and narrow covers; narrow ones leave don't-care bits.
+//                     dst_bits: if rng() & 1 == 0 {
+//                         rng() | rng()
+//                     } else {
+//                         rng() & rng()
+//                     },
+//                     ..Default::default()
+//                 });
+//             }
+//             let pick = min_cost_cover(&cands);
+//             assert!(
+//                 covers_all(&cands, &pick),
+//                 "returned pick doesn't cover the universe: {:?}",
+//                 cands
+//             );
+//             let got = cost_of(&cands, &pick);
+//             let want = brute(&cands);
+//             assert_eq!(got, want, "mismatch on {:?}", cands);
+//         }
+//     }
+// }

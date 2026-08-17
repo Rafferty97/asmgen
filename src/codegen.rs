@@ -1,9 +1,7 @@
-use std::{cmp::Ordering, hint::unreachable_unchecked};
-
 use cranelift_codegen::ir::{InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 
-use crate::bit_permutation::{BitExtract, BitPermutation, RotateOrShift};
+use crate::bit_permutation::{BitExtract, BitOp, BitPermutation};
 
 pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
     use cranelift_codegen::ir::types::I64;
@@ -68,55 +66,42 @@ fn lower_bit_permutation(
 ) -> Value {
     use cranelift_codegen::ir::types::I64;
 
-    let mut result = builder.ins().iconst(I64, permutation.fixed as i64);
+    let (fixed, extracts) = permutation.compile();
 
-    for &extract in &permutation.extracts {
-        let bits = lower_bit_extract(builder, src, extract);
+    let mut result = builder.ins().iconst(I64, fixed as i64);
+    for extract in extracts {
+        let bits = lower_bit_extract(builder, src, &extract);
         result = builder.ins().bor(result, bits);
     }
-
     result
 }
 
-fn lower_bit_extract(builder: &mut FunctionBuilder, value: Value, extract: BitExtract) -> Value {
-    let value = match extract.sh1 {
-        RotateOrShift::None => value,
-        RotateOrShift::ShiftLeft(amt) => builder.ins().ishl_imm_u(value, amt as i64),
-        RotateOrShift::ShiftRight(amt) => builder.ins().ushr_imm_u(value, amt as i64),
-        RotateOrShift::RotateLeft(amt) => builder.ins().rotl_imm_u(value, amt as i64),
-    };
+fn lower_bit_extract(builder: &mut FunctionBuilder, value: Value, extract: &BitExtract) -> Value {
+    let mut value = value;
+    for &op in extract.ops() {
+        value = lower_bit_op(builder, value, op);
+    }
+    value
+}
 
-    let value = match extract.sar {
-        0 => value,
-        amt => builder.ins().sshr_imm_u(value, amt as i64),
-    };
-
-    let value = match extract.sh2 {
-        RotateOrShift::None => value,
-        RotateOrShift::ShiftLeft(amt) => builder.ins().ishl_imm_u(value, amt as i64),
-        RotateOrShift::ShiftRight(amt) => builder.ins().ushr_imm_u(value, amt as i64),
-        RotateOrShift::RotateLeft(amt) => builder.ins().rotl_imm_u(value, amt as i64),
-    };
-
-    let value = match extract.and {
-        u64::MAX => value,
-        mask => builder.ins().band_imm_u(value, mask as i64),
-    };
-
-    // fixme: incorrect, as low bit isn't guaranteed to be 1 anymore
-    let value = match extract.mul.count_ones() {
-        0 => unsafe { unreachable_unchecked() },
-        1 => value,
-        2 => {
-            let shift = 63 - extract.mul.leading_zeros();
-            let shifted = builder.ins().ishl_imm_u(value, shift as i64);
+fn lower_bit_op(builder: &mut FunctionBuilder, value: Value, op: BitOp) -> Value {
+    match op {
+        BitOp::ShiftLeft(amt) => builder.ins().ishl_imm_u(value, amt as i64),
+        BitOp::ShiftRight(amt) => builder.ins().ushr_imm_u(value, amt as i64),
+        BitOp::ArithRight(amt) => builder.ins().sshr_imm_u(value, amt as i64),
+        BitOp::RotateRight(amt) => builder.ins().rotr_imm_u(value, amt as i64),
+        BitOp::Mask(mask) => builder.ins().band_imm_u(value, mask as i64),
+        BitOp::ShiftOr(0, amt) => {
+            let shifted = builder.ins().ishl_imm_u(value, amt as i64);
             builder.ins().bor(value, shifted)
         }
-        // todo: elide `ror` if possible
-        _ => builder.ins().imul_imm_u(value, extract.mul as i64),
-    };
-
-    value
+        BitOp::ShiftOr(amt1, amt2) => {
+            let shifted1 = builder.ins().ishl_imm_u(value, amt1 as i64);
+            let shifted2 = builder.ins().ishl_imm_u(value, amt2 as i64);
+            builder.ins().bor(shifted1, shifted2)
+        }
+        BitOp::Mul(mask) => builder.ins().imul_imm_u(value, mask as i64),
+    }
 }
 
 #[cfg(test)]
@@ -148,7 +133,7 @@ mod test {
     //     test_bit_extract(extract, &cases);
     // }
 
-    fn test_bit_extract(extract: BitExtract, cases: &[(u64, u64)]) {
+    fn test_bit_extract(extract: &BitExtract, cases: &[(u64, u64)]) {
         test_u64_to_u64(
             |builder, input| lower_bit_extract(builder, input, extract),
             |exec| {
