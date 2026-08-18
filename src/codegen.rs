@@ -105,47 +105,6 @@ fn lower_bit_op(builder: &mut FunctionBuilder, value: Value, op: BitOp) -> Value
     }
 }
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use cranelift_codegen::ir::{InstBuilder, Value};
-    use cranelift_frontend::FunctionBuilder;
-
-    #[test]
-    fn basic_test() {
-        test_u64_to_u64(
-            |builder, input| builder.ins().imul_imm_u(input, 2),
-            |func| assert_eq!(func(12), 24),
-        );
-    }
-
-    // #[test]
-    // fn lower_bit_extract_test() {
-    //     // let extract = BitExtract::ShiftMul { mask: 0b111_00000, rshift: 5, mul: 0b100 };
-    //     let extract = BitExtract::new_ror(0b111_00000, 3);
-    //     let cases = [
-    //         (0b00_000_00000, 0b000_00),
-    //         (0b11_111_11111, 0b111_00),
-    //         (0b00_010_01010, 0b010_00),
-    //         (0b11_101_10101, 0b101_00),
-    //         (0b01_001_11000, 0b001_00),
-    //         (0b10_110_00111, 0b110_00),
-    //     ];
-    //     test_bit_extract(extract, &cases);
-    // }
-
-    fn test_bit_extract(extract: &BitExtract, cases: &[(u64, u64)]) {
-        test_u64_to_u64(
-            |builder, input| lower_bit_extract(builder, input, extract),
-            |exec| {
-                for &(input, output) in cases {
-                    assert_eq!(exec(input), output);
-                }
-            },
-        );
-    }
-}
-
 struct Code(Vec<u8>);
 
 impl std::fmt::Display for Code {
@@ -223,4 +182,44 @@ pub fn test_u64_to_u64(
     tests(&func);
 
     unsafe { module.free_memory() };
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use cranelift_codegen::ir::InstBuilder;
+
+    #[test]
+    fn basic_test() {
+        test_u64_to_u64(
+            |builder, input| builder.ins().imul_imm_u(input, 2),
+            |func| assert_eq!(func(12), 24),
+        );
+    }
+
+    #[test]
+    fn lower_bit_extract_test() {
+        // let extract = BitExtract::ShiftMul { mask: 0b111_00000, rshift: 5, mul: 0b100 };
+        let extract = BitExtract::new().shr(3).and(0b11100);
+        let cases = [
+            (0b00_000_00000, 0b000_00),
+            (0b11_111_11111, 0b111_00),
+            (0b00_010_01010, 0b010_00),
+            (0b11_101_10101, 0b101_00),
+            (0b01_001_11000, 0b001_00),
+            (0b10_110_00111, 0b110_00),
+        ];
+        test_bit_extract(&extract, &cases);
+    }
+
+    fn test_bit_extract(extract: &BitExtract, cases: &[(u64, u64)]) {
+        test_u64_to_u64(
+            |builder, input| lower_bit_extract(builder, input, extract),
+            |exec| {
+                for &(input, output) in cases {
+                    assert_eq!(exec(input), output);
+                }
+            },
+        );
+    }
 }

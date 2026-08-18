@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::u64;
@@ -719,41 +718,6 @@ fn left_mask(len: u8) -> u64 {
 
 fn is_right_mask(bits: u64) -> bool {
     bits.wrapping_add(1).count_ones() <= 1
-}
-
-fn shift_bits<P>(bits: u64, src_pos: P, dst_pos: P) -> u64
-where
-    P: std::cmp::Ord + std::ops::Sub<P, Output = P>,
-    u64: std::ops::Shl<P, Output = u64> + std::ops::Shr<P, Output = u64>,
-{
-    match src_pos.cmp(&dst_pos) {
-        Ordering::Equal => bits,
-        Ordering::Less => bits << (dst_pos - src_pos),
-        Ordering::Greater => bits >> (src_pos - dst_pos),
-    }
-}
-
-struct SetBits(u64);
-
-impl Iterator for SetBits {
-    type Item = u8;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.0 {
-            0 => None,
-            bits => {
-                let pos = bits.trailing_zeros();
-                self.0 &= self.0 - 1;
-                Some(pos as u8)
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Cover {
-    pos: u8,
-    len: u8,
 }
 
 #[cfg(test)]
