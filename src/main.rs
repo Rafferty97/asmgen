@@ -1,10 +1,5 @@
-use crate::bit_permutation::{BitPermutation, BitPermutationPart};
-use crate::codegen::compile_bit_permutation;
-
-mod bit_permutation;
-mod codegen;
-mod fuzzer;
-mod playground;
+use asmgen::bit_permutation::{BitPermutation, BitPermutationPart};
+use asmgen::codegen::compile_bit_permutation;
 
 fn main() {
     let i_imm = BitPermutation::from_parts([
