@@ -9,10 +9,6 @@ use smallvec::SmallVec;
 
 use crate::playground::min_cost_cover;
 
-// fixme: investigate cranelift lowering:
-// - fuse shift and mask into `ubfx`, `ubfiz` or `pext`
-// - make use of `bfi` and related instructions
-
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct BitPermutation {
     len: u8,
@@ -400,6 +396,8 @@ impl BitOp {
     ///
     /// This method assumes that `!self.is_nop()`, as otherwise the cost would be zero.
     fn cost(&self, prev: Option<BitOp>) -> u16 {
+        debug_assert!(!self.is_nop());
+
         // fixme: account for instruction fusion
         // - shift and mask -> `ubfx` or `pext`
         // - others?
