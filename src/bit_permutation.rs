@@ -7,7 +7,10 @@ use fnv::FnvHashMap;
 use itertools::Itertools;
 use smallvec::SmallVec;
 
+use crate::bit_utils::is_aarch64_logical_immediate;
 use crate::playground::min_cost_cover;
+
+static ISA: Isa = Isa::AArch64;
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct BitPermutation {
@@ -188,6 +191,8 @@ impl BitExtract {
         // for &op in &self.ops {
         //     println!("    {op}");
         // }
+
+        self.cost.set(0);
     }
 
     /// Returns the operations comprising this `BitExtract`.
@@ -398,6 +403,8 @@ impl BitOp {
     fn cost(&self, prev: Option<BitOp>) -> u16 {
         debug_assert!(!self.is_nop());
 
+        let isa = ISA;
+
         // fixme: account for instruction fusion
         // - shift and mask -> `ubfx` or `pext`
         // - others?
@@ -407,23 +414,26 @@ impl BitOp {
             Self::ShiftRight(_) => 1,
             Self::ArithRight(_) => 1,
             Self::RotateRight(_) => 1,
-            Self::And { .. } => 1,
-            Self::ShiftOr(0, _) => 2, // fixme: depends on arch, for ARM this is 1
-            Self::ShiftOr(_, _) => 3, // fixme: depends on arch, for ARM this is 2
-            Self::Mul(_) => 3,
+            Self::And { mask, used } => match isa {
+                Isa::AArch64 => 1 + cost_aarch64_logical_imm(*mask, *used),
+                _ => 2,
+            },
+            Self::ShiftOr(0, _) => match isa {
+                Isa::AArch64 => 1,
+                _ => 2,
+            },
+            Self::ShiftOr(_, _) => match isa {
+                Isa::AArch64 => 2,
+                _ => 3,
+            },
+            Self::Mul(mask) => match isa {
+                Isa::AArch64 => 3 + cost_aarch64_mat_imm(*mask, !0),
+                _ => 4,
+            },
         }
 
         // fixme: determine whether mask can be elided by changing rotations to shifts
         // fixme: fix cost modelling for immediate instantiation
-
-        // let c_sh1 = self.sh1.cost();
-        // let c_sar = if self.sar != 0 { 1 } else { 0 };
-        // let c_sh2 = self.sh2.cost();
-        // let c_and = if self.and != u64::MAX { 1 } else { 0 };
-        // let c_sh2_and = match (self.sh2, is_right_mask(self.and), c_sh2 + c_and) {
-        //     // (RotateOrShift::ShiftRight(_), true, 2..) => 1,
-        //     _ => c_sh2 + c_and,
-        // };
 
         // self.cost = [c_sh1, c_sar, c_sh2_and, c_mul, c_or].iter().sum();
     }
@@ -451,6 +461,24 @@ impl Debug for BitOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "BitOp({self})")
     }
+}
+
+fn cost_aarch64_logical_imm(imm: u64, used: u64) -> u16 {
+    if imm & used == 0 {
+        return 0;
+    }
+    if is_aarch64_logical_immediate(imm) {
+        return 0;
+    }
+    cost_aarch64_mat_imm(imm, used)
+}
+
+fn cost_aarch64_mat_imm(imm: u64, used: u64) -> u16 {
+    let lane = |v: u64, i: u8| (v >> 16 * i) & 0xffff;
+    let lanes = (0..4).map(|i| (lane(imm, i), lane(used, i)));
+    let non_zero_lanes = lanes.clone().filter(|&(v, used)| v & used != 0).count();
+    let non_ones_lanes = lanes.clone().filter(|&(v, used)| !v & used != 0).count();
+    non_zero_lanes.min(non_ones_lanes.max(1)) as u16
 }
 
 const fn high_bit() -> u64 {
@@ -730,6 +758,13 @@ fn left_mask(len: u8) -> u64 {
 
 fn is_right_mask(bits: u64) -> bool {
     bits.wrapping_add(1).count_ones() <= 1
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Isa {
+    AArch64,
+    #[default]
+    Unknown,
 }
 
 #[cfg(test)]

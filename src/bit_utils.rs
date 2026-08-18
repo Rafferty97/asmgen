@@ -1,3 +1,15 @@
+pub fn is_aarch64_logical_immediate(value: u64) -> bool {
+    if matches!(value, 0 | u64::MAX) {
+        return false;
+    }
+    for len in [2, 4, 8, 16, 32, 64] {
+        if is_tiled(value, len) && is_rotated_run(value, len) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn tile_value(value: u64, len: u8) -> u64 {
     let mut value = value & ((1 << len) - 1);
     loop {
@@ -7,6 +19,10 @@ pub fn tile_value(value: u64, len: u8) -> u64 {
         }
         value = next_value;
     }
+}
+
+pub fn is_tiled(value: u64, len: u8) -> bool {
+    value == value.rotate_right(len as u32)
 }
 
 /// Given a value that is a tiling of length `len`,
