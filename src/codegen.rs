@@ -152,7 +152,7 @@ pub fn test_u64_to_u64(
     let mut ctx = module.make_context();
     ctx.func.signature.params.push(AbiParam::new(I64));
     ctx.func.signature.returns.push(AbiParam::new(I64));
-    ctx.set_disasm(true);
+    // ctx.set_disasm(true);
 
     let func_id = module
         .declare_function("my_func", Linkage::Export, &ctx.func.signature)
@@ -173,6 +173,9 @@ pub fn test_u64_to_u64(
     builder.finalize(frontend_config);
 
     module.define_function(func_id, &mut ctx).unwrap();
+    // let output = ctx.compiled_code().unwrap().code_buffer().to_vec();
+    // let output = format!("{}", Code(output));
+    // println!("{output}");
     module.clear_context(&mut ctx);
 
     module.finalize_definitions().unwrap();
@@ -186,6 +189,8 @@ pub fn test_u64_to_u64(
 
 #[cfg(test)]
 mod test {
+    use crate::bit_permutation::BitPermutationPart;
+
     use super::*;
     use cranelift_codegen::ir::InstBuilder;
 
@@ -195,6 +200,14 @@ mod test {
             |builder, input| builder.ins().imul_imm_u(input, 2),
             |func| assert_eq!(func(12), 24),
         );
+    }
+
+    #[test]
+    fn fuzz_case1() {
+        let mut perm = BitPermutation::new();
+        perm.push(BitPermutationPart::Repeat { len: 62, src_pos: 17 });
+        perm.push(BitPermutationPart::Repeat { len: 2, src_pos: 0 });
+        test_bit_perm(&perm, &[0x3b0a083b850f0e0e]);
     }
 
     #[test]
@@ -210,6 +223,19 @@ mod test {
             (0b10_110_00111, 0b110_00),
         ];
         test_bit_extract(&extract, &cases);
+    }
+
+    fn test_bit_perm(perm: &BitPermutation, inputs: &[u64]) {
+        test_u64_to_u64(
+            |builder, input| lower_bit_permutation(builder, input, perm),
+            |exec| {
+                for &input in inputs {
+                    let expected = perm.exec(input);
+                    let actual = exec(input);
+                    assert_eq!(expected, actual);
+                }
+            },
+        );
     }
 
     fn test_bit_extract(extract: &BitExtract, cases: &[(u64, u64)]) {

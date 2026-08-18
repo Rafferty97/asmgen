@@ -388,7 +388,7 @@ impl BitOp {
             Self::ShiftOr(a, b) => {
                 let a_mask = Self::ShiftLeft(a).calc_used_bits(output);
                 let b_mask = Self::ShiftLeft(b).calc_used_bits(output);
-                a_mask & b_mask
+                a_mask | b_mask
             }
             Self::Mul(_) => u64::MAX >> output.leading_zeros(),
         }
@@ -492,6 +492,7 @@ impl BitPermutation {
     }
 
     pub fn push(&mut self, part: BitPermutationPart) {
+        // println!("push {part:?}");
         match part {
             BitPermutationPart::Fixed { len, bits } => {
                 self.fixed |= bits << self.len;
@@ -624,7 +625,12 @@ impl BitPermutation {
                 BitExtract::new()
                     .with_origin(|| {
                         // fixme: better formatting
-                        format!("rep {} {}", PrintBinary(rol_mask), shr)
+                        format!(
+                            "rep {} {} {}",
+                            PrintBinary(src_mask),
+                            PrintBinary(rol_mask),
+                            shr
+                        )
                     })
                     .shr(shr)
                     .and(src_mask >> shr)
