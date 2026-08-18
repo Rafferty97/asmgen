@@ -45,7 +45,7 @@ pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
     builder.seal_block(entry);
 
     let arg = builder.block_params(entry)[0];
-    let result = lower_bit_permutation(&mut builder, arg, permutation);
+    let result = lower_test(&mut builder, arg);
     builder.ins().return_(&[result]);
 
     builder.finalize(frontend_config);
@@ -58,6 +58,14 @@ pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
     unsafe { module.free_memory() };
 
     output
+}
+
+pub fn lower_test(builder: &mut FunctionBuilder, value: Value) -> Value {
+    // use cranelift_codegen::ir::types::I64;
+
+    let value = builder.ins().ushr_imm_u(value, 12);
+    let value = builder.ins().band_imm_u(value, 0x3f);
+    value
 }
 
 pub fn lower_bit_permutation(
