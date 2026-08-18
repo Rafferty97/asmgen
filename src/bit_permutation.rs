@@ -10,7 +10,8 @@ use smallvec::SmallVec;
 use crate::playground::min_cost_cover;
 
 // fixme: investigate cranelift lowering:
-// - fuse shift and mask into `ubfx` or `pext`
+// - fuse shift and mask into `ubfx`, `ubfiz` or `pext`
+// - make use of `bfi` and related instructions
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct BitPermutation {
@@ -525,14 +526,16 @@ impl BitPermutation {
 
     pub fn compile(&self) -> (u64, Vec<BitExtract>) {
         // Generate shift candidates
-        let shifts = self
-            .rot_masks
-            .iter()
-            .map(|(&rol, &src_mask)| {
-                let dst_mask = src_mask.rotate_left(rol as u32);
-                ShiftExtract { rol, dst_mask }
-            })
-            .collect_vec();
+        let mut shifts = vec![];
+        let mut bits_used_once = 0;
+        let mut bits_used_many = 0;
+
+        for (&rol, &src_mask) in &self.rot_masks {
+            let dst_mask = src_mask.rotate_left(rol as u32);
+            shifts.push(ShiftExtract { rol, dst_mask });
+            bits_used_many |= bits_used_once & src_mask;
+            bits_used_once |= src_mask;
+        }
 
         // Merge rotation groups with identical source masks
         let mut groups = HashMap::new();
@@ -540,27 +543,32 @@ impl BitPermutation {
             *groups.entry(src_mask).or_insert(0) |= 1u64 << rol;
         }
 
-        // Generate broadcast and repeat candidates
-        let mut broadcasts = vec![];
+        // Generate repeat candidates
         let mut repeats = vec![];
 
         for (&src_mask, &rol_mask) in &groups {
-            if rol_mask.count_ones() < 2 {
-                continue;
-            }
-            if src_mask.count_ones() == 1 {
-                let mut dst_mask = 0;
-                for (&src_mask2, &rol_mask) in &groups {
-                    if src_mask2 & src_mask != 0 {
-                        dst_mask |= rol_mask;
-                    }
-                }
-                let src_pos = src_mask.trailing_zeros() as u8;
-                dst_mask = dst_mask.rotate_left(src_pos as u32);
-                broadcasts.push(BroadcastExtract { src_pos, dst_mask });
-            } else {
+            if rol_mask.count_ones() > 1 && src_mask.count_ones() > 1 {
                 repeats.push(RepeatExtract { src_mask, rol_mask });
             }
+        }
+
+        // Generate broadcast candidates
+        let mut broadcasts = vec![];
+
+        while bits_used_many != 0 {
+            let src_pos = bits_used_many.trailing_zeros() as u8;
+            let src_mask = 1 << src_pos;
+
+            let mut dst_mask = 0;
+            for (&src_mask2, &rol_mask) in &groups {
+                if src_mask2 & src_mask != 0 {
+                    dst_mask |= rol_mask;
+                }
+            }
+            dst_mask = dst_mask.rotate_left(src_pos as u32);
+            broadcasts.push(BroadcastExtract { src_pos, dst_mask });
+
+            bits_used_many &= bits_used_many - 1;
         }
 
         // Merge candidates

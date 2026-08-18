@@ -39,6 +39,21 @@ fn main() {
     // and		x4, x4, #0xffff
     // orr		x0, x4, x4, lsl #16
     // ret		x30
+
+    let perm = BitPermutation::from_parts([
+        BitPermutationPart::Repeat { len: 62, src_pos: 17 },
+        BitPermutationPart::Repeat { len: 2, src_pos: 0 },
+    ]);
+
+    let code = compile_bit_permutation(&perm);
+    println!("{code}");
+    // ubfm		x7, x0, #18, #17
+    // sbfm		x7, x7, #63, #63
+    // and		x7, x7, #0x3fffffffffffffff
+    // ubfm		x8, x0, #1, #0
+    // sbfm		x8, x8, #1, #63
+    // orr		x0, x7, x8
+    // ret		x30
 }
 
 struct Decoder {

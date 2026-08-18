@@ -211,6 +211,14 @@ mod test {
     }
 
     #[test]
+    fn extract_riscv5_i_imm() {
+        let mut perm = BitPermutation::new();
+        perm.push(BitPermutationPart::Slice { len: 12, src_pos: 20 });
+        perm.push(BitPermutationPart::Repeat { len: 52, src_pos: 31 });
+        test_bit_perm(&perm, &[0, 0x3b0a083b850f0e0e]);
+    }
+
+    #[test]
     fn lower_bit_extract_test() {
         // let extract = BitExtract::ShiftMul { mask: 0b111_00000, rshift: 5, mul: 0b100 };
         let extract = BitExtract::new().shr(3).and(0b11100);
@@ -226,10 +234,13 @@ mod test {
     }
 
     fn test_bit_perm(perm: &BitPermutation, inputs: &[u64]) {
+        // Common inputs for every test
+        const INPUTS: &[u64] = &[0, u64::MAX];
+
         test_u64_to_u64(
             |builder, input| lower_bit_permutation(builder, input, perm),
             |exec| {
-                for &input in inputs {
+                for &input in inputs.iter().chain(INPUTS) {
                     let expected = perm.exec(input);
                     let actual = exec(input);
                     assert_eq!(expected, actual);
