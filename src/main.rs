@@ -54,6 +54,34 @@ fn main() {
     // sbfm		x8, x8, #1, #63
     // orr		x0, x7, x8
     // ret		x30
+
+    let j_imm = BitPermutation::from_parts([
+        BitPermutationPart::Fixed { len: 1, bits: 0 },
+        BitPermutationPart::Slice { len: 4, src_pos: 21 },
+        BitPermutationPart::Slice { len: 6, src_pos: 25 },
+        BitPermutationPart::Slice { len: 1, src_pos: 20 },
+        BitPermutationPart::Slice { len: 8, src_pos: 12 },
+        BitPermutationPart::Repeat { len: 12, src_pos: 31 },
+        BitPermutationPart::Repeat { len: 32, src_pos: 31 },
+    ]);
+
+    let code = compile_bit_permutation(&j_imm);
+    println!("{code}");
+    // ubfm		x15, x0, #9, #63
+    // movz		w1, #0x800, lsl #0x0
+    // movk		w1, #0x40, lsl #0x10
+    // and		x15, x15, x1
+    // movz		w1, #0xf000, lsl #0x0
+    // movk		w1, #0x800f, lsl #0x10
+    // and		x1, x0, x1
+    // orr		x15, x15, x1
+    // ubfm		x0, x0, #32, #31
+    // sbfm		x0, x0, #52, #63
+    // movn		x1, #0xf801, lsl #0x0
+    // movk		x1, #0xfff0, lsl #0x10
+    // and		x0, x0, x1
+    // orr		x0, x15, x0
+    // ret		x30
 }
 
 struct Decoder {
