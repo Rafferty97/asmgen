@@ -49,6 +49,9 @@ pub struct BitExtract {
     dst_bits: u64,
     /// The total cost of the operations
     cost: Cell<u16>,
+    /// The origin of this bit extract
+    #[cfg(debug_assertions)]
+    origin: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -86,6 +89,15 @@ impl BitExtract {
         Default::default()
     }
 
+    /// Annotates this `BitExtract` with origin information in debug builds.
+    pub fn with_origin(mut self, origin: impl FnOnce() -> String) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            self.origin = origin();
+        }
+        self
+    }
+
     pub fn shl(mut self, amt: u8) -> Self {
         self.push(BitOp::ShiftLeft(amt));
         self
@@ -102,16 +114,16 @@ impl BitExtract {
     }
 
     pub fn rol(mut self, amt: u8) -> Self {
-        self.push(BitOp::RotateRight((64 - amt) % 64));
+        self.push(BitOp::RotateRight(0u8.wrapping_sub(amt) % 64));
         self
     }
 
     pub fn ror(mut self, amt: u8) -> Self {
-        self.push(BitOp::RotateRight(amt));
+        self.push(BitOp::RotateRight(amt % 64));
         self
     }
 
-    pub fn mask(mut self, mask: u64) -> Self {
+    pub fn and(mut self, mask: u64) -> Self {
         self.push(BitOp::And { mask, used: u64::MAX });
         self
     }
@@ -139,7 +151,7 @@ impl BitExtract {
     pub fn optimise(&mut self) {
         let mut kd_bits = Vec::<KDBits>::new();
 
-        // println!("ORIGINAL");
+        // println!("ORIGINAL {}", self.origin);
         // for &op in &self.ops {
         //     println!("    {op}");
         // }
@@ -169,14 +181,14 @@ impl BitExtract {
                 changed |= optimised != *op;
                 *op = optimised;
             }
-            // todo: fuse instructions
+            // fixme: fuse instructions
 
             if !changed {
                 break;
             }
         }
 
-        // println!("OPTIMISED");
+        // println!("OPTIMISED {}", self.origin);
         // for &op in &self.ops {
         //     println!("    {op}");
         // }
@@ -216,7 +228,13 @@ impl BitExtract {
 
 impl Default for BitExtract {
     fn default() -> Self {
-        Self { ops: SmallVec::new(), dst_bits: u64::MAX, cost: Cell::new(0) }
+        Self {
+            ops: SmallVec::new(),
+            dst_bits: u64::MAX,
+            cost: Cell::new(0),
+            #[cfg(debug_assertions)]
+            origin: "<default>".into(),
+        }
     }
 }
 
@@ -229,15 +247,23 @@ impl Display for BitExtract {
             }
             write!(f, "{op}")?;
         }
+        write!(f, " (cost = {})", self.cost())?;
+        #[cfg(debug_assertions)]
+        {
+            write!(f, " (origin = {})", self.origin)?;
+        }
         Ok(())
     }
 }
 
 impl Debug for BitExtract {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut dbg = f.debug_tuple("BitExtract");
-        for op in &self.ops {
-            dbg.field(op);
+        let mut dbg = f.debug_struct("BitExtract");
+        dbg.field("ops", &self.ops);
+        dbg.field("cost", &self.cost());
+        #[cfg(debug_assertions)]
+        {
+            dbg.field("origin", &self.origin);
         }
         dbg.finish()
     }
@@ -311,34 +337,6 @@ impl BitOp {
         };
         result.validate();
         result
-    }
-
-    /// Optimise the operation, given the needed output bits.
-    ///
-    /// `dst_bits` specifies which bits in the output are actually needed.
-    fn optimise_backward(self, dst_bits: u64) -> Self {
-        match self {
-            // If none of the output bits are needed, the operation can be elided
-            _ if dst_bits == 0 => Self::nop(),
-            // // An arithmetic right shift where the input's high bit
-            // // is known to be zero is equivalent to a logical right shift
-            // Self::ArithRight(amt) if src_bits & high_bit() == 0 => Self::ShiftRight(amt),
-            // Self::ShiftOr(_, _) => todo!(),
-            // Self::Mul(_) => todo!(),
-            // // Strength-reduce multiplication where possible
-            // Self::Mul(mask) => match mask.count_ones() {
-            //     0 => Self::Mask(0),
-            //     1 => Self::ShiftLeft(mask.trailing_zeros() as u8),
-            //     2 => {
-            //         let amt1 = mask.trailing_zeros() as u8;
-            //         let amt2 = (mask & (mask - 1)).trailing_zeros() as u8;
-            //         Self::ShiftOr(amt1, amt2)
-            //     }
-            //     _ => self,
-            // },
-            // The operation can't be optimised
-            _ => self,
-        }
     }
 
     fn apply(self, value: u64) -> u64 {
@@ -526,8 +524,6 @@ impl BitPermutation {
     }
 
     pub fn compile(&self) -> (u64, Vec<BitExtract>) {
-        // fixme: add debug info to trace where each candidate comes from
-
         // Generate shift candidates
         let shifts = self
             .rot_masks
@@ -548,13 +544,19 @@ impl BitPermutation {
         let mut broadcasts = vec![];
         let mut repeats = vec![];
 
-        for (src_mask, rol_mask) in groups {
+        for (&src_mask, &rol_mask) in &groups {
             if rol_mask.count_ones() < 2 {
                 continue;
             }
             if src_mask.count_ones() == 1 {
+                let mut dst_mask = 0;
+                for (&src_mask2, &rol_mask) in &groups {
+                    if src_mask2 & src_mask != 0 {
+                        dst_mask |= rol_mask;
+                    }
+                }
                 let src_pos = src_mask.trailing_zeros() as u8;
-                let dst_mask = rol_mask.rotate_left(src_pos as u32);
+                dst_mask = dst_mask.rotate_left(src_pos as u32);
                 broadcasts.push(BroadcastExtract { src_pos, dst_mask });
             } else {
                 repeats.push(RepeatExtract { src_mask, rol_mask });
@@ -562,55 +564,79 @@ impl BitPermutation {
         }
 
         // Merge candidates
+        let shift_broadcasts = shifts
+            .iter()
+            .flat_map(|shift| broadcasts.iter().map(move |broadcast| (shift, broadcast)))
+            .flat_map(|(shift, broadcast)| {
+                let &ShiftExtract { rol, dst_mask: sh_dst_mask } = shift;
+                let &BroadcastExtract { src_pos, dst_mask: bc_dst_mask } = broadcast;
+
+                // Prune shifts that only cover broadcast bit
+                if sh_dst_mask & !bc_dst_mask == 0 {
+                    return None;
+                }
+
+                // Combine the destination masks
+                let dst_mask = sh_dst_mask | bc_dst_mask;
+
+                // First, rotate the word to place the broadcasted bit at the top
+                let ex_ror = src_pos + 1;
+
+                // Next, arithmetic shift right by the minimum amount that covers all needed output bits
+                let sar_lz = bc_dst_mask
+                    .rotate_right((src_pos + rol) as u32)
+                    .leading_zeros();
+                let ex_sar = (63 - sar_lz) as u8;
+
+                // Verify that this combination is feasible
+                let bc_mask = right_mask(ex_sar).rotate_left((src_pos + 1 + rol) as u32);
+                let clobber_mask = bc_mask & !bc_dst_mask;
+                if clobber_mask & sh_dst_mask != 0 {
+                    return None;
+                }
+
+                // Final rotatation to satisfy the demanded net rotation
+                let ex_rol = ((rol as i32) + (src_pos as i32 + 1) + (63 - sar_lz as i32)) as u8;
+
+                let extract = BitExtract::new().with_origin(|| format!("shl {rol} + bc {src_pos}"));
+                Some(extract.ror(ex_ror).sar(ex_sar).rol(ex_rol).and(dst_mask))
+            })
+            .collect_vec();
         let shifts = shifts.into_iter().map(|ShiftExtract { rol, dst_mask }| {
-            BitExtract::new().rol(rol).mask(dst_mask).optimised()
+            BitExtract::new()
+                .with_origin(|| format!("shl {rol}"))
+                .rol(rol)
+                .and(dst_mask)
         });
         let broadcasts = broadcasts
             .into_iter()
             .map(|BroadcastExtract { src_pos, dst_mask }| {
                 BitExtract::new()
+                    .with_origin(|| format!("bc {src_pos}"))
                     .shl(63 - src_pos)
                     .sar((63 - dst_mask.trailing_zeros()) as u8)
-                    .mask(dst_mask)
-                    .optimised()
+                    .and(dst_mask)
             });
         let repeats = repeats
             .into_iter()
-            .map(|RepeatExtract { src_mask, rol_mask }| {
-                // fixme: other rotations
-                let shr = 0;
+            // fixme: other rotations
+            .flat_map(|r| [(r, 0), (r, r.src_mask.trailing_zeros() as u8)])
+            .map(|(RepeatExtract { src_mask, rol_mask }, shr)| {
                 BitExtract::new()
+                    .with_origin(|| {
+                        // fixme: better formatting
+                        format!("rep {} {}", PrintBinary(rol_mask), shr)
+                    })
                     .shr(shr)
-                    .mask(src_mask >> shr)
+                    .and(src_mask >> shr)
                     .mul(rol_mask.rotate_left(shr as u32))
-                    .optimised()
             });
-        let candidates = shifts.chain(broadcasts).chain(repeats).collect_vec();
-
-        // // Generate candidates
-
-        // let mut candidates = vec![];
-
-        // for shift in &shifts {
-        //     candidates.push(BitExtractOld::new_shift(*shift));
-        // }
-
-        // for broadcast in broadcasts {
-        //     candidates.push(BitExtractOld::new_broadcast(broadcast));
-
-        //     for shift in &shifts {
-        //         candidates.extend(BitExtractOld::try_new_shift_broadcast(*shift, broadcast));
-        //     }
-        // }
-
-        // for repeat in repeats {
-        //     // fixme: try all plausible rotations
-        //     candidates.push(BitExtractOld::new_repeat(repeat, 0));
-        //     candidates.push(BitExtractOld::new_repeat(
-        //         repeat,
-        //         repeat.src_mask.trailing_zeros() as u8,
-        //     ));
-        // }
+        let candidates = shifts
+            .chain(broadcasts)
+            .chain(repeats)
+            .chain(shift_broadcasts)
+            .map(BitExtract::optimised)
+            .collect_vec();
 
         // println!("CANDIDATES");
         // println!("----------");
@@ -633,9 +659,7 @@ impl BitPermutation {
         // }
         // println!("");
 
-        // todo: exploit known-zero bits (will need API to express)
-
-        // todo
+        // fixme: better API
         (self.fixed, extracts)
     }
 
@@ -647,35 +671,6 @@ impl BitPermutation {
         dst
     }
 }
-
-// impl BitExtractOld {
-//     fn try_new_shift_broadcast(shift: ShiftExtract, broadcast: BroadcastExtract) -> Option<Self> {
-//         let ShiftExtract { rol, dst_mask: sh_dst_mask } = shift;
-//         let BroadcastExtract { src_pos, dst_mask: bc_dst_mask } = broadcast;
-
-//         let dst_mask = sh_dst_mask | bc_dst_mask;
-
-//         // Broadcast determines initial rotation
-//         let sh1 = RotateOrShift::new_rol(63 - src_pos, u64::MAX);
-
-//         // Shift determines final rotation, and therefore arithmetic shift distance
-//         let sar_lz = bc_dst_mask
-//             .rotate_right((src_pos + rol) as u32)
-//             .leading_zeros();
-//         let sar = (63 - sar_lz) as u8;
-
-//         // Shift determines final rotation
-//         let rol = (rol as i32) - sh1.net_rol() + (sar as i32);
-//         let sh2 = RotateOrShift::new_rol((rol % 64) as u8, u64::MAX);
-
-//         let and = dst_mask;
-//         let mul = 1;
-//         let cost = 0;
-//         let cover = dst_mask;
-
-//         Some(Self { sh1, sar, sh2, and, mul, cost, dst_bits: cover })
-//     }
-// }
 
 struct PrintBinary(u64);
 
@@ -759,16 +754,6 @@ impl Iterator for SetBits {
 struct Cover {
     pos: u8,
     len: u8,
-}
-
-fn find_smallest_cover(value: u64) -> Cover {
-    debug_assert_ne!(value, 0);
-
-    // todo: optimise
-
-    let lz = value.leading_zeros() as u8;
-    let tz = value.trailing_zeros() as u8;
-    Cover { pos: tz, len: 64 - tz - lz }
 }
 
 #[cfg(test)]

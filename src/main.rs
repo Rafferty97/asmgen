@@ -19,14 +19,14 @@ fn main2() {
 
     let code = compile_bit_permutation(&i_imm);
     println!("{code}");
+    // ubfm		x3, x0, #32, #31
+    // sbfm		x0, x3, #52, #63
+    // ret		x30
 
     let perm = BitPermutation::from_parts([
         BitPermutationPart::Repeat { len: 16, src_pos: 0 },
         BitPermutationPart::Repeat { len: 16, src_pos: 16 },
     ]);
-    // extr		x3, x0, x0, #32
-    // sbfm		x0, x3, #52, #63
-    // ret		x30
 
     let code = compile_bit_permutation(&perm);
     println!("{code}");
