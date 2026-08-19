@@ -87,11 +87,12 @@ fn lower_bit_extract(builder: &mut FunctionBuilder, value: Value, extract: &BitE
 
 fn lower_bit_op(builder: &mut FunctionBuilder, value: Value, op: BitOp) -> Value {
     match op {
+        BitOp::Nop => value,
         BitOp::ShiftLeft(amt) => builder.ins().ishl_imm_u(value, amt as i64),
         BitOp::ShiftRight(amt) => builder.ins().ushr_imm_u(value, amt as i64),
         BitOp::ArithRight(amt) => builder.ins().sshr_imm_u(value, amt as i64),
         BitOp::RotateRight(amt) => builder.ins().rotr_imm_u(value, amt as i64),
-        BitOp::And { mask, used } => builder.ins().band_imm_u(value, (mask & used) as i64), // fixme: not always optimal
+        BitOp::And(mask) => builder.ins().band_imm_u(value, mask.min_bits() as i64), // fixme: not always optimal
         BitOp::ShiftOr(0, amt) => {
             let shifted = builder.ins().ishl_imm_u(value, amt as i64);
             builder.ins().bor(value, shifted)

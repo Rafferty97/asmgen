@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
+use std::ops::{BitAnd, BitOr};
 use std::u64;
 
 use fnv::FnvHashMap;
@@ -55,6 +56,8 @@ pub struct BitExtract {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BitOp {
+    /// No operation.
+    Nop,
     /// Left shift.
     ShiftLeft(u8),
     /// Logical right shift.
@@ -65,12 +68,90 @@ pub enum BitOp {
     RotateRight(u8),
     /// Bitwise AND.
     /// It is an invariant that `!mask & !used == 0`.
-    And { mask: u64, used: u64 },
+    And(PartialBits),
     /// Two shifts followed by a bitwise or;
     /// the smaller shift preceeds the larger shift, and may be zero.
     ShiftOr(u8, u8),
     /// Integer multiplication.
     Mul(u64),
+}
+
+/// A bitset, where some of the bits may be unused and thus free to assume any value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PartialBits {
+    /// The bitset. Any unused bits must be set to 1.
+    bits: u64,
+    /// The used bits.
+    used: u64,
+}
+
+impl Default for PartialBits {
+    fn default() -> Self {
+        Self { bits: u64::MAX, used: u64::MAX }
+    }
+}
+
+impl PartialBits {
+    pub fn new(bits: u64, used: u64) -> Self {
+        debug_assert_eq!(!bits & !used, 0);
+        Self { bits, used }
+    }
+
+    pub fn full(bits: u64) -> Self {
+        Self { bits, used: u64::MAX }
+    }
+
+    pub fn with_used(self, used: u64) -> Self {
+        Self::new(self.bits | !used, self.used & used)
+    }
+
+    pub fn bits(self) -> u64 {
+        self.bits
+    }
+
+    pub fn used(self) -> u64 {
+        self.used
+    }
+
+    pub fn ones(self) -> u64 {
+        self.bits & self.used
+    }
+
+    pub fn zeros(self) -> u64 {
+        !self.bits
+    }
+
+    pub fn unused(self) -> u64 {
+        !self.used
+    }
+
+    pub fn min_bits(self) -> u64 {
+        self.bits & self.used
+    }
+
+    pub fn max_bits(self) -> u64 {
+        self.bits
+    }
+}
+
+impl BitOr for PartialBits {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        let bits = self.bits | rhs.bits;
+        let used = self.ones() | rhs.ones() | (self.used & rhs.used);
+        Self::new(bits, used)
+    }
+}
+
+impl BitAnd for PartialBits {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        let bits = self.bits & rhs.bits;
+        let used = !bits | (self.used & rhs.used);
+        Self::new(bits, used)
+    }
 }
 
 /// Known and demanded bits.
@@ -123,7 +204,7 @@ impl BitExtract {
     }
 
     pub fn and(mut self, mask: u64) -> Self {
-        self.push(BitOp::And { mask, used: u64::MAX });
+        self.push(BitOp::And(PartialBits::full(mask)));
         self
     }
 
@@ -134,9 +215,6 @@ impl BitExtract {
 
     /// Pushes an operation.
     pub fn push(&mut self, op: BitOp) {
-        if op.is_nop() {
-            return;
-        }
         self.ops.push(op);
         self.dst_bits = op.apply(self.dst_bits);
     }
@@ -156,7 +234,7 @@ impl BitExtract {
         // }
 
         loop {
-            self.ops.retain(|op| !op.is_nop());
+            self.ops.retain(|op| *op != BitOp::Nop);
             kd_bits.resize(self.ops.len(), Default::default());
 
             // Forward pass
@@ -173,8 +251,18 @@ impl BitExtract {
                 used = op.calc_used_bits(used);
             }
 
-            // Optimise instructions
+            // Fuse instructions
             let mut changed = false;
+            for i in 0..self.ops.len().saturating_sub(1) {
+                let [op1, op2] = self.ops.get_disjoint_mut([i, i + 1]).unwrap();
+                if let Some(fused) = BitOp::try_fuse(*op1, *op2) {
+                    *op1 = BitOp::Nop;
+                    *op2 = fused;
+                    changed = true;
+                }
+            }
+
+            // Optimise instructions
             for (op, &kd_bits) in self.ops.iter_mut().zip(&kd_bits) {
                 let optimised = op.optimise(kd_bits);
                 changed |= optimised != *op;
@@ -271,33 +359,32 @@ impl Debug for BitExtract {
 }
 
 impl BitOp {
-    /// Returns the canonical "nop" operation
-    fn nop() -> Self {
-        Self::ShiftLeft(0)
+    /// Returns the canonical operation that sets all bits to zero.
+    fn set_to_zero() -> Self {
+        Self::And(PartialBits::full(0))
     }
 
-    pub fn validate(self) {
-        debug_assert!(match self {
-            Self::ShiftLeft(amt) => amt < 64,
-            Self::ShiftRight(amt) => amt < 64,
-            Self::ArithRight(amt) => amt < 64,
-            Self::RotateRight(amt) => amt < 64,
-            Self::And { mask, used } => !mask & !used == 0,
-            Self::ShiftOr(a, b) => a < b && b < 64,
-            Self::Mul(_) => true,
-        })
-    }
-
-    fn is_nop(self) -> bool {
-        match self {
-            Self::ShiftLeft(0) => true,
-            Self::ShiftRight(0) => true,
-            Self::ArithRight(0) => true,
-            Self::RotateRight(0) => true,
-            Self::And { mask: u64::MAX, .. } => true,
-            Self::ShiftOr(0, 0) => true,
-            Self::Mul(1) => true,
-            _ => false,
+    /// Fuses two instructions, if possible.
+    fn try_fuse(first: Self, second: Self) -> Option<Self> {
+        match (first, second) {
+            (Self::ShiftLeft(a), Self::ShiftLeft(b)) => Some(match a + b {
+                sum @ 0..64 => Self::ShiftLeft(sum),
+                _ => Self::set_to_zero(),
+            }),
+            (Self::ShiftRight(a), Self::ShiftRight(b)) => Some(match a + b {
+                sum @ 0..64 => Self::ShiftRight(sum),
+                _ => Self::set_to_zero(),
+            }),
+            (Self::ArithRight(a), Self::ArithRight(b)) => {
+                let sum = (a + b).min(63);
+                Some(Self::ArithRight(sum))
+            }
+            (Self::RotateRight(a), Self::RotateRight(b)) => {
+                let sum = (a + b) % 64;
+                Some(Self::RotateRight(sum))
+            }
+            (Self::And(a), Self::And(b)) => Some(Self::And(a & b)),
+            _ => None,
         }
     }
 
@@ -305,23 +392,32 @@ impl BitOp {
     fn optimise(self, KDBits { zeros, used }: KDBits) -> Self {
         let result = match self {
             // If the input bits are all zero, no op has any effect
-            _ if zeros == u64::MAX => Self::nop(),
+            _ if zeros == u64::MAX => Self::Nop,
             // If none of the output bits are needed, the operation can be elided
-            _ if used == 0 => Self::nop(),
+            _ if used == 0 => Self::Nop,
+            // Operations with no effect can be reduced to nop
+            Self::ShiftLeft(0) => Self::Nop,
+            Self::ShiftRight(0) => Self::Nop,
+            Self::ArithRight(0) => Self::Nop,
+            Self::RotateRight(0) => Self::Nop,
+            Self::ShiftOr(0, 0) => Self::Nop,
+            Self::Mul(1) => Self::Nop,
             // An arithmetic right shift where the input's high bit
             // is known to be zero is equivalent to a logical right shift
             Self::ArithRight(amt) if zeros & high_bit() != 0 => Self::ShiftRight(amt),
-            // Try to reduce a rotation to a left or right shift,
-            // checking the degenerate zero case first to avoid a panic
-            Self::RotateRight(0) => Self::nop(),
+            // Try to reduce a rotation to a left or right shift
             Self::RotateRight(amt) if !zeros << (64 - amt) == 0 => Self::ShiftRight(amt),
             Self::RotateRight(amt) if !zeros >> amt == 0 => Self::ShiftLeft(64 - amt),
             Self::RotateRight(amt) if used >> (64 - amt) == 0 => Self::ShiftRight(amt),
             Self::RotateRight(amt) if used << amt == 0 => Self::ShiftLeft(64 - amt),
-            // There is no need to clear bits that are already zero or unused
-            Self::And { mask, .. } => {
-                let used = used & !zeros;
-                Self::And { mask: mask | !used, used }
+            // There is no need to clear bits that are already zero or unused,
+            // and a mask that clears no bits can be elided entirely
+            Self::And(mask) => {
+                let mask = mask.with_used(used & !zeros);
+                match mask.zeros() {
+                    0 => Self::Nop,
+                    _ => Self::And(mask),
+                }
             }
             // Strength-reduce multiplication where possible
             Self::Mul(mask) => match mask.count_ones() {
@@ -342,11 +438,12 @@ impl BitOp {
 
     fn apply(self, value: u64) -> u64 {
         match self {
+            Self::Nop => value,
             Self::ShiftLeft(amt) => value << amt,
             Self::ShiftRight(amt) => value >> amt,
             Self::ArithRight(amt) => ((value as i64) >> amt) as u64,
             Self::RotateRight(amt) => value.rotate_right(amt as u32),
-            Self::And { mask, .. } => value & mask,
+            Self::And(mask) => value & mask.bits(),
             Self::ShiftOr(amt1, amt2) => (value << amt1) | (value << amt2),
             Self::Mul(mask) => value.wrapping_mul(mask),
         }
@@ -355,11 +452,12 @@ impl BitOp {
     /// Propagates known zero bits from input to output.
     fn calc_known_zeros(self, input: u64) -> u64 {
         match self {
+            Self::Nop => input,
             Self::ShiftLeft(amt) => input << amt | right_mask(amt),
             Self::ShiftRight(amt) => input >> amt | left_mask(amt),
             Self::ArithRight(amt) => ((input as i64) >> amt) as u64,
             Self::RotateRight(amt) => input.rotate_right(amt as u32),
-            Self::And { mask, .. } => input | !mask,
+            Self::And(mask) => input | mask.zeros(),
             Self::ShiftOr(a, b) => {
                 let a_mask = Self::ShiftLeft(a).calc_known_zeros(input);
                 let b_mask = Self::ShiftLeft(b).calc_known_zeros(input);
@@ -379,6 +477,7 @@ impl BitOp {
     fn calc_used_bits(self, output: u64) -> u64 {
         match self {
             _ if output == 0 => 0,
+            Self::Nop => output,
             Self::ShiftLeft(amt) => output >> amt,
             Self::ShiftRight(amt) => output << amt,
             Self::ArithRight(amt) => {
@@ -386,7 +485,7 @@ impl BitOp {
                 (output << amt) | needs_sign.then_some(high_bit()).unwrap_or(0)
             }
             Self::RotateRight(amt) => output.rotate_left(amt as u32),
-            Self::And { mask, .. } => output & mask,
+            Self::And(mask) => output & mask.bits(),
             Self::ShiftOr(a, b) => {
                 let a_mask = Self::ShiftLeft(a).calc_used_bits(output);
                 let b_mask = Self::ShiftLeft(b).calc_used_bits(output);
@@ -398,11 +497,7 @@ impl BitOp {
 
     /// Computes the cost of this operation,
     /// accounting for any potential fusion with the preceeding operation.
-    ///
-    /// This method assumes that `!self.is_nop()`, as otherwise the cost would be zero.
     fn cost(&self, prev: Option<BitOp>) -> u16 {
-        debug_assert!(!self.is_nop());
-
         let isa = ISA;
 
         // fixme: account for instruction fusion
@@ -410,12 +505,13 @@ impl BitOp {
         // - others?
         // or: just model the fused ops directly?
         match self {
+            Self::Nop => 0,
             Self::ShiftLeft(_) => 1,
             Self::ShiftRight(_) => 1,
             Self::ArithRight(_) => 1,
             Self::RotateRight(_) => 1,
-            Self::And { mask, used } => match isa {
-                Isa::AArch64 => 1 + cost_aarch64_logical_imm(*mask, *used),
+            Self::And(mask) => match isa {
+                Isa::AArch64 => 1 + cost_aarch64_logical_imm(*mask),
                 _ => 2,
             },
             Self::ShiftOr(0, _) => match isa {
@@ -427,7 +523,7 @@ impl BitOp {
                 _ => 3,
             },
             Self::Mul(mask) => match isa {
-                Isa::AArch64 => 3 + cost_aarch64_mat_imm(*mask, !0),
+                Isa::AArch64 => 3 + cost_aarch64_mat_imm(PartialBits::full(*mask)),
                 _ => 4,
             },
         }
@@ -437,11 +533,26 @@ impl BitOp {
 
         // self.cost = [c_sh1, c_sar, c_sh2_and, c_mul, c_or].iter().sum();
     }
+
+    #[cfg(debug_assertions)]
+    pub fn validate(self) {
+        debug_assert!(match self {
+            Self::Nop => true,
+            Self::ShiftLeft(amt) => amt < 64,
+            Self::ShiftRight(amt) => amt < 64,
+            Self::ArithRight(amt) => amt < 64,
+            Self::RotateRight(amt) => amt < 64,
+            Self::And(_) => true,
+            Self::ShiftOr(a, b) => a < b && b < 64,
+            Self::Mul(_) => true,
+        })
+    }
 }
 
 impl Display for BitOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
+            Self::Nop => write!(f, "nop"),
             Self::ShiftLeft(amt) => write!(f, "shl {amt}"),
             Self::ShiftRight(amt) => write!(f, "shr {amt}"),
             Self::ArithRight(amt) => write!(f, "sar {amt}"),
@@ -449,7 +560,7 @@ impl Display for BitOp {
                 33..63 => write!(f, "rol {}", 64 - amt),
                 _ => write!(f, "ror {amt}"),
             },
-            Self::And { mask, used } => write!(f, "and {}", PrintBinary(mask & used)),
+            Self::And(mask) => write!(f, "and {}", PrintBinary(mask)),
             Self::ShiftOr(0, amt) => write!(f, "or (shl {amt})"),
             Self::ShiftOr(amt1, amt2) => write!(f, "shl {amt1}, or (shl {})", amt2 - amt1), // fixme
             Self::Mul(mask) => write!(f, "mul {}", PrintBinary(mask)),
@@ -463,21 +574,22 @@ impl Debug for BitOp {
     }
 }
 
-fn cost_aarch64_logical_imm(imm: u64, used: u64) -> u16 {
-    if imm & used == 0 {
+fn cost_aarch64_logical_imm(imm: PartialBits) -> u16 {
+    if imm.min_bits() == 0 {
         return 0;
     }
-    if is_aarch64_logical_immediate(imm) {
+    if is_aarch64_logical_immediate(imm.min_bits()) {
         return 0;
     }
-    cost_aarch64_mat_imm(imm, used)
+    cost_aarch64_mat_imm(imm)
 }
 
-fn cost_aarch64_mat_imm(imm: u64, used: u64) -> u16 {
+fn cost_aarch64_mat_imm(imm: PartialBits) -> u16 {
+    // fixme: optimise with `min_bits` and `max_bits`
     let lane = |v: u64, i: u8| (v >> 16 * i) & 0xffff;
-    let lanes = (0..4).map(|i| (lane(imm, i), lane(used, i)));
-    let non_zero_lanes = lanes.clone().filter(|&(v, used)| v & used != 0).count();
-    let non_ones_lanes = lanes.clone().filter(|&(v, used)| !v & used != 0).count();
+    let lanes = (0..4).map(|i| (lane(imm.bits(), i), lane(imm.used(), i)));
+    let non_zero_lanes = lanes.clone().filter(|&(b, u)| b & u != 0).count();
+    let non_ones_lanes = lanes.clone().filter(|&(b, u)| !b & u != 0).count();
     non_zero_lanes.min(non_ones_lanes.max(1)) as u16
 }
 
@@ -637,19 +749,15 @@ impl BitPermutation {
             })
             .collect_vec();
         let shifts = shifts.into_iter().map(|ShiftExtract { rol, dst_mask }| {
-            BitExtract::new()
-                .with_origin(|| format!("shl {rol}"))
-                .rol(rol)
-                .and(dst_mask)
+            let extract = BitExtract::new().with_origin(|| format!("shl {rol}"));
+            extract.rol(rol).and(dst_mask)
         });
         let broadcasts = broadcasts
             .into_iter()
             .map(|BroadcastExtract { src_pos, dst_mask }| {
-                BitExtract::new()
-                    .with_origin(|| format!("bc {src_pos}"))
-                    .shl(63 - src_pos)
-                    .sar((63 - dst_mask.trailing_zeros()) as u8)
-                    .and(dst_mask)
+                let extract = BitExtract::new().with_origin(|| format!("bc {src_pos}"));
+                let sar = (63 - dst_mask.trailing_zeros()) as u8;
+                extract.shl(63 - src_pos).sar(sar).and(dst_mask)
             });
         let repeats = repeats
             .into_iter()
@@ -711,9 +819,9 @@ impl BitPermutation {
     }
 }
 
-struct PrintBinary(u64);
+struct PrintBinary<T>(T);
 
-impl std::fmt::Display for PrintBinary {
+impl std::fmt::Display for PrintBinary<u64> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.0 == 0 {
             return write!(f, "[]");
@@ -730,6 +838,13 @@ impl std::fmt::Display for PrintBinary {
             write!(f, " {:04b}", part)?;
         }
         write!(f, "]")
+    }
+}
+
+impl std::fmt::Display for PrintBinary<PartialBits> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // fixme: improve
+        PrintBinary(self.0.min_bits()).fmt(f)
     }
 }
 
@@ -812,5 +927,31 @@ mod test {
         ]);
 
         // todo
+    }
+
+    #[test]
+    fn fuse_rotates() {
+        let extract = BitExtract::new().ror(12).rol(6).rol(9).ror(5);
+        assert_eq!(extract.ops().len(), 4);
+        let extract = extract.optimised();
+        assert_eq!(extract.ops(), &[BitOp::RotateRight(2)]);
+    }
+
+    #[test]
+    fn partial_bits_bitor() {
+        let a = PartialBits::full(0b000_111_111).with_used(0b111_111_000);
+        let b = PartialBits::full(0b011_011_011).with_used(0b110_110_110);
+        let c = PartialBits::full(0b011_111_111).with_used(0b110_111_010);
+        const X: u16 = 510;
+        const Y: u16 = 442;
+        assert_eq!(a | b, c);
+    }
+
+    #[test]
+    fn partial_bits_bitand() {
+        let a = PartialBits::full(0b000_111_111).with_used(0b111_111_000);
+        let b = PartialBits::full(0b011_011_011).with_used(0b110_110_110);
+        let c = PartialBits::full(0b000_011_011).with_used(0b111_110_100);
+        assert_eq!(a & b, c);
     }
 }
