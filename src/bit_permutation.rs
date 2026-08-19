@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use crate::bit_utils::{is_aarch64_logical_immediate, iter_set_bits};
 use crate::partial_bits::PartialBits;
-use crate::playground::min_cost_cover;
+use crate::playground::min_cost_cover2;
 use crate::print::PrintBits;
 
 static ISA: Isa = Isa::AArch64;
@@ -53,6 +53,7 @@ pub struct BitExtract {
     /// The origin of this bit extract
     #[cfg(debug_assertions)]
     origin: String,
+    net_ror: Cell<Option<u8>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -233,6 +234,29 @@ impl BitExtract {
 
         cost
     }
+
+    fn net_ror(&self) -> u8 {
+        if let Some(result) = self.net_ror.get() {
+            return result;
+        }
+
+        let net_ror = self
+            .ops
+            .iter()
+            .map(|op| match *op {
+                BitOp::Nop => 0,
+                BitOp::ShiftLeft(amt) => 0u8.wrapping_sub(amt),
+                BitOp::ShiftRight(amt) => amt,
+                BitOp::ArithRight(amt) => amt,
+                BitOp::RotateRight(amt) => amt,
+                BitOp::And(_) => 0,
+                BitOp::Copy(_) => 0,
+            })
+            .fold(0, |a, b| a + b);
+
+        self.net_ror.set(Some(net_ror));
+        net_ror
+    }
 }
 
 impl Default for BitExtract {
@@ -243,6 +267,7 @@ impl Default for BitExtract {
             cost: Cell::new(0),
             #[cfg(debug_assertions)]
             origin: "<default>".into(),
+            net_ror: Cell::default(),
         }
     }
 }
@@ -411,7 +436,7 @@ impl BitOp {
             Self::ArithRight(_) => 1,
             Self::RotateRight(_) => 1,
             Self::And(mask) => match isa {
-                Isa::AArch64 => 1 + cost_aarch64_logical_imm(*mask),
+                Isa::AArch64 => 1, // + cost_aarch64_logical_imm(*mask),
                 _ => 2,
             },
             Self::Copy(mask) => match (mask.count_ones(), mask.leading_zeros()) {
@@ -427,7 +452,7 @@ impl BitOp {
                     _ => 3,
                 },
                 _ => match isa {
-                    Isa::AArch64 => 3 + cost_aarch64_mat_imm(PartialBits::full(*mask)),
+                    Isa::AArch64 => 3, // + cost_aarch64_mat_imm(PartialBits::full(*mask)),
                     _ => 4,
                 },
             },
@@ -533,6 +558,7 @@ impl BitPermutation {
     }
 
     pub fn push(&mut self, part: BitPermutationPart) {
+        println!("{part:?}");
         match part {
             BitPermutationPart::Fixed { len, bits } => {
                 self.fixed |= bits << self.len;
@@ -568,6 +594,8 @@ impl BitPermutation {
         let mut shifts = vec![];
         let mut bits_used_once = 0;
         let mut bits_used_many = 0;
+
+        let start = std::time::Instant::now();
 
         for (&rol, &src_mask) in &self.rot_masks {
             let dst_mask = src_mask.rotate_left(rol as u32);
@@ -649,17 +677,21 @@ impl BitPermutation {
                 Some(extract.ror(ex_ror).sar(ex_sar).rol(ex_rol).and(dst_mask))
             })
             .collect_vec();
-        let shifts = shifts.into_iter().map(|ShiftExtract { rol, dst_mask }| {
-            let extract = BitExtract::new().with_origin(|| format!("shl {rol}"));
-            extract.rol(rol).and(dst_mask)
-        });
+        let shifts = shifts
+            .into_iter()
+            .map(|ShiftExtract { rol, dst_mask }| {
+                let extract = BitExtract::new().with_origin(|| format!("shl {rol}"));
+                extract.rol(rol).and(dst_mask)
+            })
+            .collect_vec();
         let broadcasts = broadcasts
             .into_iter()
             .map(|BroadcastExtract { src_pos, dst_mask }| {
                 let extract = BitExtract::new().with_origin(|| format!("bc {src_pos}"));
                 let sar = (63 - dst_mask.trailing_zeros()) as u8;
                 extract.shl(63 - src_pos).sar(sar).and(dst_mask)
-            });
+            })
+            .collect_vec();
         let repeats = repeats
             .into_iter()
             // fixme: other rotations
@@ -678,27 +710,43 @@ impl BitPermutation {
                     .shr(shr)
                     .and(src_mask >> shr)
                     .copy(rol_mask.rotate_left(shr as u32))
-            });
-        let candidates = shifts
-            .chain(broadcasts)
-            .chain(repeats)
-            .chain(shift_broadcasts)
-            .map(BitExtract::optimised)
+            })
             .collect_vec();
 
-        // println!("CANDIDATES");
+        println!("shifts = {}", shifts.len());
+        println!("broadcasts = {}", broadcasts.len());
+        println!("repeats = {}", repeats.len());
+        println!("shift_broadcasts = {}", shift_broadcasts.len());
+
+        let extracts = min_cost_cover2(&shifts, &broadcasts, &repeats, &shift_broadcasts);
+
+        // let candidates = shifts
+        //     .into_iter()
+        //     .chain(broadcasts)
+        //     .chain(repeats)
+        //     .chain(shift_broadcasts)
+        //     .map(BitExtract::optimised)
+        //     .collect_vec();
+
+        // println!("pre-prune count = {}", candidates.len());
+        // let candidates = prune_dominated_candidates(&candidates);
+        // println!("post-prune count = {}", candidates.len());
+
+        // println!("CANDIDATES {}", candidates.len());
         // println!("----------");
         // for candidate in &candidates {
-        //     println!("{candidate}");
+        //     println!("Name: {}\tCost: {}", candidate.origin, candidate.cost());
+        //     println!("    Covers: {}", PrintBits(candidate.dst_bits()));
+        //     println!();
         // }
         // println!("");
 
         // Find minimum cost
-        let mut candidates = candidates;
-        let extracts: Vec<_> = min_cost_cover(&candidates)
-            .into_iter()
-            .map(|idx| std::mem::take(&mut candidates[idx]))
-            .collect();
+        // let mut candidates = candidates;
+        // let extracts: Vec<_> = min_cost_cover(&candidates)
+        //     .into_iter()
+        //     .map(|idx| std::mem::take(&mut candidates[idx]))
+        //     .collect();
 
         // println!("EXTRACTS");
         // println!("----------");
@@ -875,5 +923,23 @@ mod test {
         // ones and zeros, so both min_bits and max_bits leave them dirty.
         let bits = PartialBits::full(0x0000_1234_5678_0000).with_used(0x0000_ffff_ffff_0000);
         assert_eq!(cost_aarch64_mat_imm(bits), 2);
+    }
+
+    #[test]
+    #[ignore]
+    fn slow_case() {
+        let perm = BitPermutation::from_parts([
+            BitPermutationPart::Repeat { len: 3, src_pos: 2 },
+            BitPermutationPart::Repeat { len: 3, src_pos: 1 },
+            BitPermutationPart::Repeat { len: 3, src_pos: 60 },
+            BitPermutationPart::Repeat { len: 15, src_pos: 36 },
+            BitPermutationPart::Repeat { len: 6, src_pos: 55 },
+            BitPermutationPart::Repeat { len: 15, src_pos: 14 },
+            BitPermutationPart::Repeat { len: 19, src_pos: 0 },
+        ]);
+
+        let (_, extracts) = perm.compile();
+        // println!("{extracts:#?}");
+        std::hint::black_box(extracts);
     }
 }

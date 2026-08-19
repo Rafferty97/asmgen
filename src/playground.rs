@@ -1,4 +1,97 @@
+use itertools::Itertools;
+
 use crate::bit_permutation::BitExtract;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Candidate {
+    sh_mask: u64,
+    bc_mask: u64,
+    shbc_mask: u64,
+    cost: u16,
+}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.cost.cmp(&other.cost).reverse()
+    }
+}
+
+pub fn min_cost_cover2(
+    shifts: &[BitExtract],
+    broadcasts: &[BitExtract],
+    _repeats: &[BitExtract],
+    shift_broadcasts: &[BitExtract],
+) -> Vec<BitExtract> {
+    let start = std::time::Instant::now();
+
+    let mut best = Candidate { sh_mask: 0, bc_mask: 0, shbc_mask: 0, cost: u16::MAX };
+
+    for bc_mask in 0..(1 << broadcasts.len()) {
+        for shbc_mask in 0..(1 << broadcasts.len()) {
+            let fixed_cover = select_subset(broadcasts, bc_mask)
+                .chain(select_subset(shift_broadcasts, shbc_mask))
+                .fold(0, |acc, ex| acc | ex.dst_bits());
+
+            let fixed_cost = select_subset(broadcasts, bc_mask)
+                .chain(select_subset(shift_broadcasts, shbc_mask))
+                .fold(0, |acc, ex| acc + ex.cost());
+
+            if fixed_cost > best.cost {
+                continue;
+            }
+
+            let (sh_mask, shift_cost) = select_uncovered(shifts, !fixed_cover);
+
+            let cost = fixed_cost + shift_cost;
+            let candidate = Candidate { sh_mask, bc_mask, shbc_mask, cost };
+            best = best.max(candidate);
+        }
+    }
+
+    println!("best candidate = {:?}", best);
+
+    let result = select_subset(shifts, best.sh_mask)
+        .chain(select_subset(broadcasts, best.bc_mask))
+        .chain(select_subset(shift_broadcasts, best.shbc_mask))
+        .cloned()
+        .collect_vec();
+
+    let expected_cover = shifts.iter().fold(0, |acc, ex| acc | ex.dst_bits());
+    let actual_cover = result.iter().fold(0, |acc, ex| acc | ex.dst_bits());
+    debug_assert_eq!(expected_cover, actual_cover);
+
+    println!("min_cost_cover took {:?}", start.elapsed());
+
+    result
+}
+
+fn select_subset<T>(items: &[T], mask: u64) -> impl Iterator<Item = &T> {
+    items
+        .iter()
+        .enumerate()
+        .take(63)
+        .filter(move |(idx, _)| (mask >> idx) & 1 != 0)
+        .map(|(_, item)| item)
+}
+
+fn select_uncovered(items: &[BitExtract], uncovered: u64) -> (u64, u16) {
+    let mut mask = 0;
+    let mut cost = 0;
+    for (idx, item) in items.iter().enumerate() {
+        if item.dst_bits() & uncovered == 0 {
+            continue;
+        }
+        mask |= 1 << idx;
+        cost += item.cost();
+    }
+    (mask, cost)
+}
 
 /// Find the minimum-total-cost subset of `candidates` whose covers OR together
 /// to cover every bit that *any* candidate covers. The set of needed bits is
@@ -18,6 +111,8 @@ use crate::bit_permutation::BitExtract;
 /// On the small, domination-heavy inputs this problem produces, the reductions
 /// usually settle it before any real branching happens.
 pub fn min_cost_cover(candidates: &[BitExtract]) -> Vec<usize> {
+    let start = std::time::Instant::now();
+
     // The bits we must cover are exactly those some candidate can supply.
     let universe: u64 = candidates.iter().fold(0, |acc, c| acc | c.dst_bits());
     if universe == 0 {
@@ -37,6 +132,8 @@ pub fn min_cost_cover(candidates: &[BitExtract]) -> Vec<usize> {
     let mut chosen: Vec<usize> = Vec::new();
 
     solve(&items, universe, 0, &mut chosen, &mut best);
+
+    println!("min_cost_cover took {:?}", start.elapsed());
 
     // A solution is guaranteed to exist, so `best` is always Some here.
     best.expect("universe is coverable by the full candidate set")
@@ -238,6 +335,75 @@ fn solve(
         );
         chosen.pop();
     }
+}
+
+/// Remove candidates that can never appear in an optimal cover.
+///
+/// Candidate A dominates candidate B when A's cover is a superset of B's and A
+/// costs no more: any solution using B can substitute A without covering less
+/// or paying more, so B is redundant. Dropping dominated candidates is exact —
+/// it cannot change the optimal cost.
+///
+/// This is the *global* form of the domination check `solve` already performs
+/// per-branch against the restricted covers. Running it once up front doesn't
+/// prune anything the recursion wouldn't, but it shrinks the pool that every
+/// node re-scans, which matters when the candidate generator emits a large
+/// near-cartesian product.
+///
+/// Candidates with an empty cover are dropped: they contribute nothing and
+/// would otherwise be dominated by everything.
+///
+/// Returns the surviving candidates in their original relative order.
+pub fn prune_dominated_candidates(candidates: &[BitExtract]) -> Vec<BitExtract> {
+    let items: Vec<(u16, u64)> = candidates
+        .iter()
+        .map(|c| (c.cost(), c.dst_bits()))
+        .collect();
+
+    let n = items.len();
+    let mut keep = vec![true; n];
+
+    for a in 0..n {
+        let (cost_a, cover_a) = items[a];
+
+        // An empty cover can never help; drop it outright.
+        if cover_a == 0 {
+            keep[a] = false;
+            continue;
+        }
+
+        if !keep[a] {
+            continue;
+        }
+
+        for b in 0..n {
+            if a == b || !keep[b] {
+                continue;
+            }
+
+            let (cost_b, cover_b) = items[b];
+
+            // A dominates B iff A covers everything B covers, at no greater cost.
+            let a_covers_b = (cover_b & !cover_a) == 0;
+            if !a_covers_b || cost_a > cost_b {
+                continue;
+            }
+
+            // Exact duplicates dominate each other; keep only the lower index so
+            // they don't mutually eliminate.
+            if cost_a == cost_b && cover_a == cover_b && a > b {
+                continue;
+            }
+
+            keep[b] = false;
+        }
+    }
+
+    candidates
+        .iter()
+        .zip(keep)
+        .filter_map(|(c, k)| k.then(|| c.clone()))
+        .collect()
 }
 
 // #[cfg(test)]
