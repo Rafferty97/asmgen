@@ -509,11 +509,10 @@ fn cost_aarch64_logical_imm(imm: PartialBits) -> u16 {
 
 fn cost_aarch64_mat_imm(imm: PartialBits) -> u16 {
     // fixme: optimise with `min_bits` and `max_bits`
-    let lane = |v: u64, i: u8| (v >> 16 * i) & 0xffff;
-    let lanes = (0..4).map(|i| (lane(imm.bits(), i), lane(imm.used(), i)));
-    let non_zero_lanes = lanes.clone().filter(|&(b, u)| b & u != 0).count();
-    let non_ones_lanes = lanes.clone().filter(|&(b, u)| !b & u != 0).count();
-    non_zero_lanes.min(non_ones_lanes.max(1)) as u16
+    let lanes = |v: u64| (0..4).map(move |i| (v >> 16 * i) & 0xffff);
+    let non_zero_lanes = lanes(imm.min_bits()).filter(|&bits| bits != 0).count();
+    let non_full_lanes = lanes(imm.max_bits()).filter(|&bits| bits != 0xffff).count();
+    non_zero_lanes.min(non_full_lanes.max(1)) as u16
 }
 
 const fn high_bit() -> u64 {
@@ -811,5 +810,90 @@ mod test {
         assert_eq!(extract.ops().len(), 4);
         let extract = extract.optimised();
         assert_eq!(extract.ops(), &[BitOp::RotateRight(2)]);
+    }
+
+    #[test]
+    fn test_cost_aarch64_mat_imm() {
+        // Zero: no nonzero lanes, movz path needs nothing (xzr).
+        let bits = PartialBits::full(0);
+        assert_eq!(cost_aarch64_mat_imm(bits), 0);
+
+        // All-ones: movn path covers every lane, but the movn itself still costs 1.
+        let bits = PartialBits::full(!0);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        // Single nonzero lane, each position: one movz.
+        let bits = PartialBits::full(0x0000_0000_0000_1234);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        let bits = PartialBits::full(0x0000_0000_1234_0000);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        let bits = PartialBits::full(0x0000_1234_0000_0000);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        let bits = PartialBits::full(0x1234_0000_0000_0000);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        // Single non-0xffff lane: movn + 0 movk beats movz + 3 movk.
+        let bits = PartialBits::full(0xffff_ffff_ffff_1234);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        let bits = PartialBits::full(0x1234_ffff_ffff_ffff);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        // Two nonzero lanes (the 0x00010001 mask from the multiply-broadcast case).
+        let bits = PartialBits::full(0x0000_0000_0001_0001);
+        assert_eq!(cost_aarch64_mat_imm(bits), 2);
+
+        // Two non-0xffff lanes.
+        let bits = PartialBits::full(0xffff_1234_5678_ffff);
+        assert_eq!(cost_aarch64_mat_imm(bits), 2);
+
+        // Three lanes each way; neither path wins, both cost 3.
+        let bits = PartialBits::full(0x1234_5678_0000_ffff);
+        assert_eq!(cost_aarch64_mat_imm(bits), 3);
+
+        // Four nonzero, four non-0xffff: 4 either way.
+        let bits = PartialBits::full(0x1234_5678_9abc_def0);
+        assert_eq!(cost_aarch64_mat_imm(bits), 4);
+
+        // A logical-immediate-shaped value still costs by lane count here; folding
+        // is decided by the caller, not this function.
+        let bits = PartialBits::full(0x0000_0000_0000_ffff);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        // Everything free: min_bits == 0 (movz path costs 0), so the min is 0.
+        let bits = PartialBits::full(0xdead_beef_dead_beef).with_used(0);
+        assert_eq!(cost_aarch64_mat_imm(bits), 0);
+
+        // One fully-free lane, rest constrained to zero: the free lane can go to 0.
+        let bits = PartialBits::full(0).with_used(0xffff_ffff_ffff_0000);
+        assert_eq!(cost_aarch64_mat_imm(bits), 0);
+
+        // One fully-free lane, rest constrained to 0xffff: free lane goes to 0xffff,
+        // so the movn path sees zero non-full lanes and costs 1.
+        let bits = PartialBits::full(0xffff_ffff_ffff_ffff).with_used(0xffff_ffff_ffff_0000);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        // Free bits *within* a lane that also has demanded ones: the lane is nonzero
+        // under min_bits regardless, so it still needs a movz.
+        let bits = PartialBits::full(0x0000_0000_0000_1234).with_used(0x0000_0000_0000_ff00);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        // Free bits within a lane whose demanded bits are all zero: min_bits clears
+        // the lane entirely, so it costs nothing on the movz path.
+        let bits = PartialBits::full(0).with_used(0x0000_0000_0000_00ff);
+        assert_eq!(cost_aarch64_mat_imm(bits), 0);
+
+        // Freedom lets the movn path win: three lanes are demanded-0xffff, the
+        // fourth is free and resolves to 0xffff.
+        let bits = PartialBits::full(0xffff_ffff_ffff_0000).with_used(0xffff_ffff_ffff_0000);
+        assert_eq!(cost_aarch64_mat_imm(bits), 1);
+
+        // Partial freedom that can't rescue either path: two lanes demand a mix of
+        // ones and zeros, so both min_bits and max_bits leave them dirty.
+        let bits = PartialBits::full(0x0000_1234_5678_0000).with_used(0x0000_ffff_ffff_0000);
+        assert_eq!(cost_aarch64_mat_imm(bits), 2);
     }
 }
