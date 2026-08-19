@@ -1,7 +1,6 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
-use std::ops::{BitAnd, BitOr};
 use std::u64;
 
 use fnv::FnvHashMap;
@@ -9,7 +8,9 @@ use itertools::Itertools;
 use smallvec::SmallVec;
 
 use crate::bit_utils::is_aarch64_logical_immediate;
+use crate::partial_bits::PartialBits;
 use crate::playground::min_cost_cover;
+use crate::print::PrintBits;
 
 static ISA: Isa = Isa::AArch64;
 
@@ -74,88 +75,6 @@ pub enum BitOp {
     ShiftOr(u8, u8),
     /// Integer multiplication.
     Mul(u64),
-}
-
-/// A bitset, where some of the bits may be unused and thus free to assume any value.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct PartialBits {
-    /// The bitset. Any unused bits must be set to 1.
-    bits: u64,
-    /// The used bits.
-    used: u64,
-}
-
-impl Default for PartialBits {
-    fn default() -> Self {
-        Self { bits: u64::MAX, used: u64::MAX }
-    }
-}
-
-impl PartialBits {
-    pub fn new(bits: u64, used: u64) -> Self {
-        debug_assert_eq!(!bits & !used, 0);
-        Self { bits, used }
-    }
-
-    pub fn full(bits: u64) -> Self {
-        Self { bits, used: u64::MAX }
-    }
-
-    pub fn with_used(self, used: u64) -> Self {
-        Self::new(self.bits | !used, self.used & used)
-    }
-
-    pub fn bits(self) -> u64 {
-        self.bits
-    }
-
-    pub fn used(self) -> u64 {
-        self.used
-    }
-
-    pub fn ones(self) -> u64 {
-        self.bits & self.used
-    }
-
-    pub fn zeros(self) -> u64 {
-        !self.bits
-    }
-
-    pub fn unused(self) -> u64 {
-        !self.used
-    }
-
-    pub fn min_bits(self) -> u64 {
-        self.bits & self.used
-    }
-
-    pub fn max_bits(self) -> u64 {
-        self.bits
-    }
-
-    pub fn contains(self, value: u64) -> bool {
-        (value | !self.used) == self.bits
-    }
-}
-
-impl BitOr for PartialBits {
-    type Output = Self;
-
-    fn bitor(self, rhs: Self) -> Self::Output {
-        let bits = self.bits | rhs.bits;
-        let used = self.ones() | rhs.ones() | (self.used & rhs.used);
-        Self::new(bits, used)
-    }
-}
-
-impl BitAnd for PartialBits {
-    type Output = Self;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        let bits = self.bits & rhs.bits;
-        let used = !bits | (self.used & rhs.used);
-        Self::new(bits, used)
-    }
 }
 
 /// Known and demanded bits.
@@ -564,10 +483,10 @@ impl Display for BitOp {
                 33..63 => write!(f, "rol {}", 64 - amt),
                 _ => write!(f, "ror {amt}"),
             },
-            Self::And(mask) => write!(f, "and {}", PrintBinary(mask)),
+            Self::And(mask) => write!(f, "and {}", PrintBits(mask)),
             Self::ShiftOr(0, amt) => write!(f, "or (shl {amt})"),
             Self::ShiftOr(amt1, amt2) => write!(f, "shl {amt1}, or (shl {})", amt2 - amt1), // fixme
-            Self::Mul(mask) => write!(f, "mul {}", PrintBinary(mask)),
+            Self::Mul(mask) => write!(f, "mul {}", PrintBits(mask)),
         }
     }
 }
@@ -635,7 +554,6 @@ impl BitPermutation {
     }
 
     pub fn push(&mut self, part: BitPermutationPart) {
-        // println!("push {part:?}");
         match part {
             BitPermutationPart::Fixed { len, bits } => {
                 self.fixed |= bits << self.len;
@@ -773,8 +691,8 @@ impl BitPermutation {
                         // fixme: better formatting
                         format!(
                             "rep {} {} {}",
-                            PrintBinary(src_mask),
-                            PrintBinary(rol_mask),
+                            PrintBits(src_mask),
+                            PrintBits(rol_mask),
                             shr
                         )
                     })
@@ -823,35 +741,6 @@ impl BitPermutation {
     }
 }
 
-struct PrintBinary<T>(T);
-
-impl std::fmt::Display for PrintBinary<u64> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0 == 0 {
-            return write!(f, "[]");
-        }
-
-        let mut parts = (0..64)
-            .step_by(4)
-            .rev()
-            .map(|i| (self.0 >> i) & 0b1111)
-            .skip_while(|b| *b == 0);
-
-        write!(f, "[{:04b}", parts.next().unwrap())?;
-        for part in parts {
-            write!(f, " {:04b}", part)?;
-        }
-        write!(f, "]")
-    }
-}
-
-impl std::fmt::Display for PrintBinary<PartialBits> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // fixme: improve
-        PrintBinary(self.0.min_bits()).fmt(f)
-    }
-}
-
 #[inline(always)]
 fn make_mask(pos: u8, len: u8) -> u64 {
     match (pos, len) {
@@ -875,10 +764,6 @@ fn left_mask(len: u8) -> u64 {
     }
 }
 
-fn is_right_mask(bits: u64) -> bool {
-    bits.wrapping_add(1).count_ones() <= 1
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Isa {
     AArch64,
@@ -898,8 +783,6 @@ mod test {
             BitPermutationPart::Slice { len: 3, src_pos: 5 },
             BitPermutationPart::Slice { len: 2, src_pos: 5 },
         ]);
-
-        println!("{permutation:?}");
 
         assert_eq!(permutation.exec(0b00_000_00000), 0b00_000_000_11);
         assert_eq!(permutation.exec(0b11_111_11111), 0b11_111_111_11);
@@ -923,47 +806,10 @@ mod test {
     }
 
     #[test]
-    fn test_riscv_immediates() {
-        // Decode permutations
-        let i_imm = BitPermutation::from_parts([
-            BitPermutationPart::Slice { len: 12, src_pos: 20 },
-            BitPermutationPart::Repeat { len: 32, src_pos: 31 },
-        ]);
-
-        // todo
-    }
-
-    #[test]
     fn fuse_rotates() {
         let extract = BitExtract::new().ror(12).rol(6).rol(9).ror(5);
         assert_eq!(extract.ops().len(), 4);
         let extract = extract.optimised();
         assert_eq!(extract.ops(), &[BitOp::RotateRight(2)]);
-    }
-
-    #[test]
-    fn partial_bits_bitor() {
-        let a = PartialBits::full(0b000_111_111).with_used(0b111_111_000);
-        let b = PartialBits::full(0b011_011_011).with_used(0b110_110_110);
-        let c = PartialBits::full(0b011_111_111).with_used(0b110_111_010);
-        assert_eq!(a | b, c);
-
-        assert!(c.contains(a.min_bits() | b.min_bits()));
-        assert!(c.contains(a.min_bits() | b.max_bits()));
-        assert!(c.contains(a.max_bits() | b.min_bits()));
-        assert!(c.contains(a.max_bits() | b.max_bits()));
-    }
-
-    #[test]
-    fn partial_bits_bitand() {
-        let a = PartialBits::full(0b000_111_111).with_used(0b111_111_000);
-        let b = PartialBits::full(0b011_011_011).with_used(0b110_110_110);
-        let c = PartialBits::full(0b000_011_011).with_used(0b111_110_100);
-        assert_eq!(a & b, c);
-
-        assert!(c.contains(a.min_bits() & b.min_bits()));
-        assert!(c.contains(a.min_bits() & b.max_bits()));
-        assert!(c.contains(a.max_bits() & b.min_bits()));
-        assert!(c.contains(a.max_bits() & b.max_bits()));
     }
 }

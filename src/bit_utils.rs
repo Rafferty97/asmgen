@@ -10,17 +10,6 @@ pub fn is_aarch64_logical_immediate(value: u64) -> bool {
     false
 }
 
-pub fn tile_value(value: u64, len: u8) -> u64 {
-    let mut value = value & ((1 << len) - 1);
-    loop {
-        let next_value = (value << len) | value;
-        if next_value == value {
-            return value;
-        }
-        value = next_value;
-    }
-}
-
 pub fn is_tiled(value: u64, len: u8) -> bool {
     value == value.rotate_right(len as u32)
 }
@@ -72,28 +61,39 @@ mod test {
             let actual = is_rotated_run_naive(value, 64);
             assert_eq!(expected, actual);
         }
+    }
 
-        fn is_rotated_run_naive(value: u64, len: u8) -> bool {
-            // Mask off the unused bits
-            let mask = u64::MAX >> (64 - len);
-            let val = value & mask;
+    fn is_rotated_run_naive(value: u64, len: u8) -> bool {
+        // Mask off the unused bits
+        let mask = u64::MAX >> (64 - len);
+        let val = value & mask;
 
-            // All zeros or all ones within the n-bit window: accept.
-            if val == 0 || val == mask {
-                return true;
+        // All zeros or all ones within the n-bit window: accept.
+        if val == 0 || val == mask {
+            return true;
+        }
+
+        // A contiguous run (possibly wrapping around the n-bit ring) has exactly
+        // one 0->1 transition when scanned cyclically. Count rising edges.
+        let mut transitions = 0;
+        for i in 0..len {
+            let cur = (val >> i) & 1;
+            let nxt = (val >> ((i + 1) % len)) & 1;
+            if cur == 0 && nxt == 1 {
+                transitions += 1;
             }
+        }
+        transitions == 1
+    }
 
-            // A contiguous run (possibly wrapping around the n-bit ring) has exactly
-            // one 0->1 transition when scanned cyclically. Count rising edges.
-            let mut transitions = 0;
-            for i in 0..len {
-                let cur = (val >> i) & 1;
-                let nxt = (val >> ((i + 1) % len)) & 1;
-                if cur == 0 && nxt == 1 {
-                    transitions += 1;
-                }
+    fn tile_value(value: u64, len: u8) -> u64 {
+        let mut value = value & ((1 << len) - 1);
+        loop {
+            let next_value = (value << len) | value;
+            if next_value == value {
+                return value;
             }
-            transitions == 1
+            value = next_value;
         }
     }
 }
