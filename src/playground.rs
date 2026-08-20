@@ -125,7 +125,7 @@ pub fn min_cost_cover2(
         cover |= best.dst_bits();
     }
 
-    // println!("min_cost_cover took {:?}", start.elapsed());
+    println!("min_cost_cover took {:?}", start.elapsed());
 
     return chosen.into_iter().cloned().collect();
 

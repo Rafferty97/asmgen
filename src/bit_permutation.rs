@@ -677,14 +677,14 @@ impl BitPermutation {
                 let extract = BitExtract::new().with_origin(|| format!("shl {rol} + bc {src_pos}"));
                 let ex = extract.ror(ex_ror).sar(ex_sar).rol(ex_rol).and(dst_mask);
                 assert_eq!(ex.net_ror(), 0u8.wrapping_sub(rol) % 64);
-                Some(ex)
+                Some(ex.optimised())
             })
             .collect_vec();
         let shifts = shifts
             .into_iter()
             .map(|ShiftExtract { rol, dst_mask }| {
                 let extract = BitExtract::new().with_origin(|| format!("shl {rol}"));
-                extract.rol(rol).and(dst_mask)
+                extract.rol(rol).and(dst_mask).optimised()
             })
             .collect_vec();
         let broadcasts = broadcasts
@@ -692,7 +692,7 @@ impl BitPermutation {
             .map(|BroadcastExtract { src_pos, dst_mask }| {
                 let extract = BitExtract::new().with_origin(|| format!("bc {src_pos}"));
                 let sar = (63 - dst_mask.trailing_zeros()) as u8;
-                extract.shl(63 - src_pos).sar(sar).and(dst_mask)
+                extract.shl(63 - src_pos).sar(sar).and(dst_mask).optimised()
             })
             .collect_vec();
         let repeats = repeats
@@ -713,6 +713,7 @@ impl BitPermutation {
                     .shr(shr)
                     .and(src_mask >> shr)
                     .copy(rol_mask.rotate_left(shr as u32))
+                    .optimised()
             })
             .collect_vec();
 
@@ -751,12 +752,12 @@ impl BitPermutation {
         //     .map(|idx| std::mem::take(&mut candidates[idx]))
         //     .collect();
 
-        // println!("EXTRACTS");
-        // println!("----------");
-        // for extract in &extracts {
-        //     println!("{extract}");
-        // }
-        // println!("");
+        println!("EXTRACTS");
+        println!("----------");
+        for extract in &extracts {
+            println!("{extract}");
+        }
+        println!("");
 
         // fixme: better API
         (self.fixed, extracts)
