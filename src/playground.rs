@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::bit_permutation::BitExtract;
+use crate::{bit_permutation::BitExtract, bit_utils::iter_set_bits};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Candidate {
@@ -9,6 +9,17 @@ struct Candidate {
     shbc_mask: u64,
     cost: u16,
 }
+
+// #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// struct Candidate {
+//     shift_mask: u64,
+//     /// Maps broadcast -> shift to fuse, if any
+//     /// N @ 0-63 = fuse with shift N
+//     /// 254 = bare broadcast
+//     /// 255 = no broadcast
+//     broadcasts: [u8; 64],
+//     cost: u16,
+// }
 
 impl PartialOrd for Candidate {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -22,53 +33,229 @@ impl Ord for Candidate {
     }
 }
 
+// impl Default for Candidate {
+//     fn default() -> Self {
+//         Candidate { shift_mask: u64::MAX, broadcasts: [0; 64], cost: u16::MAX }
+//     }
+// }
+
+fn covers(a: u64, b: u64) -> bool {
+    a | b == a
+}
+
+/// Cost-to-cover ratio. Lower is better.
+#[derive(Clone, Copy, Debug)]
+struct CostCover {
+    cost: u16,
+    cover: u16,
+}
+
+impl Ord for CostCover {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.cost * other.cover).cmp(&(other.cost * self.cover))
+    }
+}
+
+impl PartialOrd for CostCover {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for CostCover {}
+
+impl PartialEq for CostCover {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
 pub fn min_cost_cover2(
     shifts: &[BitExtract],
     broadcasts: &[BitExtract],
-    _repeats: &[BitExtract],
+    repeats: &[BitExtract],
     shift_broadcasts: &[BitExtract],
 ) -> Vec<BitExtract> {
     let start = std::time::Instant::now();
 
-    let mut best = Candidate { sh_mask: 0, bc_mask: 0, shbc_mask: 0, cost: u16::MAX };
-
-    for bc_mask in 0..(1 << broadcasts.len()) {
-        for shbc_mask in 0..(1 << broadcasts.len()) {
-            let fixed_cover = select_subset(broadcasts, bc_mask)
-                .chain(select_subset(shift_broadcasts, shbc_mask))
-                .fold(0, |acc, ex| acc | ex.dst_bits());
-
-            let fixed_cost = select_subset(broadcasts, bc_mask)
-                .chain(select_subset(shift_broadcasts, shbc_mask))
-                .fold(0, |acc, ex| acc + ex.cost());
-
-            if fixed_cost > best.cost {
-                continue;
-            }
-
-            let (sh_mask, shift_cost) = select_uncovered(shifts, !fixed_cover);
-
-            let cost = fixed_cost + shift_cost;
-            let candidate = Candidate { sh_mask, bc_mask, shbc_mask, cost };
-            best = best.max(candidate);
-        }
-    }
-
-    println!("best candidate = {:?}", best);
-
-    let result = select_subset(shifts, best.sh_mask)
-        .chain(select_subset(broadcasts, best.bc_mask))
-        .chain(select_subset(shift_broadcasts, best.shbc_mask))
-        .cloned()
+    // Merge the candidate pool
+    let mut candidates = shifts
+        .iter()
+        .chain(broadcasts)
+        .chain(repeats)
+        .chain(shift_broadcasts)
         .collect_vec();
 
-    let expected_cover = shifts.iter().fold(0, |acc, ex| acc | ex.dst_bits());
-    let actual_cover = result.iter().fold(0, |acc, ex| acc | ex.dst_bits());
-    debug_assert_eq!(expected_cover, actual_cover);
+    // The bits we must cover are exactly those some candidate can supply.
+    let universe: u64 = candidates.iter().fold(0, |acc, c| acc | c.dst_bits());
+    if universe == 0 {
+        // No candidate covers anything: nothing needs covering, empty solution.
+        return Vec::new();
+    }
 
-    println!("min_cost_cover took {:?}", start.elapsed());
+    // Initial state
+    let mut cover = 0;
+    let mut chosen = Vec::<&BitExtract>::new();
 
-    result
+    while cover != universe {
+        // Filter out dead candidates
+        candidates.retain(|c| !covers(cover, c.dst_bits()));
+
+        // Score the remaining candidates
+        let candidate_costs = candidates.iter().map(|c| {
+            let cover = (c.dst_bits() & !cover).count_ones() as u16;
+            let added_cost = c.cost();
+            let saved_cost = chosen
+                .iter()
+                .filter(|d| covers(c.dst_bits(), d.dst_bits()))
+                .map(|d| d.cost())
+                .sum::<u16>();
+            let cost = added_cost.saturating_sub(saved_cost);
+            (c, CostCover { cost, cover })
+        });
+
+        // Pick the best
+        let (&best, _) = candidate_costs.min_by_key(|&(_, cost)| cost).unwrap();
+
+        // Add it to the set and remove subsumed candidates
+        chosen.retain(|c| !covers(best.dst_bits(), c.dst_bits()));
+        chosen.push(best);
+
+        // Update the new cover
+        cover |= best.dst_bits();
+    }
+
+    // println!("min_cost_cover took {:?}", start.elapsed());
+
+    return chosen.into_iter().cloned().collect();
+
+    // let mut complete = 0;
+    // let mut partial = 0;
+    // for shbc in shift_broadcasts {
+    //     let shift = shifts
+    //         .iter()
+    //         .find(|sh| sh.net_ror() == shbc.net_ror())
+    //         .unwrap();
+    //     let broadcast = broadcasts
+    //         .iter()
+    //         .find(|bc| covers(shbc.dst_bits(), bc.dst_bits()))
+    //         .unwrap();
+    //     if covers(shbc.dst_bits(), shift.dst_bits() | broadcast.dst_bits()) {
+    //         complete += 1;
+    //     } else {
+    //         partial += 1;
+    //     }
+    // }
+    // dbg!(complete);
+    // dbg!(partial);
+
+    // let mut best = vec![0; 1 << broadcasts.len()];
+    // let mut prev = vec![0; 1 << broadcasts.len()];
+
+    // for (shift_idx, shift) in shifts.iter().enumerate() {
+    //     prev.copy_from_slice(&best);
+
+    //     let net_ror = shift.net_ror();
+    //     let shift_broadcasts = shift_broadcasts
+    //         .iter()
+    //         .enumerate()
+    //         .filter(|(_, shbc)| shbc.net_ror() == net_ror)
+    //         .collect_vec();
+
+    //     for bc_mask in 0..best.len() {
+    //         for &(shbc_idx, shbc) in &shift_broadcasts {
+    //             let (bc_idx, bc) = broadcasts
+    //                 .iter()
+    //                 .enumerate()
+    //                 .find(|(_, bc)| bc.dst_bits() & !shbc.dst_bits() == 0)
+    //                 .unwrap();
+    //             if (bc_mask >> bc_idx) & 1 != 0 {
+    //                 // already claimed
+    //                 continue;
+    //             }
+
+    //             let new_bc_mask = bc_mask | (1 << bc_idx);
+    //             let cost = prev[bc_mask] + shbc.cost() - bc.cost();
+    //             best[new_bc_mask] = best[new_bc_mask].min(cost);
+    //         }
+    //     }
+    // }
+
+    // // Compute the covered bits for every combination of broadcasts
+    // let mut bc_covers = vec![0; 1 << broadcasts.len()];
+    // for (idx, broadcast) in broadcasts.iter().enumerate() {
+    //     let cover = broadcast.dst_bits();
+    //     let mut bc_mask = 1 << idx;
+    //     while bc_mask < bc_covers.len() {
+    //         bc_covers[bc_mask] |= cover;
+    //         bc_mask = (bc_mask + 1) | (1 << idx);
+    //     }
+    // }
+
+    // let bc_rows = bc_covers
+    //     .into_iter()
+    //     .map(|cover| {
+    //         let mut out = 0u64;
+    //         for (idx, shift) in shifts.iter().enumerate() {
+    //             if shift.dst_bits() & !cover == 0 {
+    //                 out |= 1 << idx;
+    //             }
+    //         }
+    //         out
+    //     })
+    //     .collect_vec();
+
+    // // For all subsets of broadcasts
+    // let mut minimal_masks = vec![];
+    // for (bc_mask, &cover) in bc_rows.iter().enumerate() {
+    //     // Check that no broadcast is redundant
+    //     let dominated = iter_set_bits(bc_mask as u64)
+    //         .map(|bit| bc_mask & !(1 << bit))
+    //         .any(|bc_mask2| cover == bc_rows[bc_mask2]);
+    //     if !dominated {
+    //         minimal_masks.push(bc_mask);
+    //     }
+    // }
+
+    // println!("Number of minimal masks = {}", minimal_masks.len());
+
+    // let mut best = Candidate { sh_mask: 0, bc_mask: 0, shbc_mask: 0, cost: u16::MAX };
+
+    // for bc_mask in 0..(1 << broadcasts.len()) {
+    //     for shbc_mask in 0..(1 << broadcasts.len()) {
+    //         let fixed_cover = select_subset(broadcasts, bc_mask)
+    //             .chain(select_subset(shift_broadcasts, shbc_mask))
+    //             .fold(0, |acc, ex| acc | ex.dst_bits());
+
+    //         let fixed_cost = select_subset(broadcasts, bc_mask)
+    //             .chain(select_subset(shift_broadcasts, shbc_mask))
+    //             .fold(0, |acc, ex| acc + ex.cost());
+
+    //         if fixed_cost > best.cost {
+    //             continue;
+    //         }
+
+    //         let (sh_mask, shift_cost) = select_uncovered(shifts, !fixed_cover);
+
+    //         let cost = fixed_cost + shift_cost;
+    //         let candidate = Candidate { sh_mask, bc_mask, shbc_mask, cost };
+    //         best = best.max(candidate);
+    //     }
+    // }
+
+    // println!("best candidate = {:?}", best);
+
+    // let result = select_subset(shifts, best.sh_mask)
+    //     .chain(select_subset(broadcasts, best.bc_mask))
+    //     .chain(select_subset(shift_broadcasts, best.shbc_mask))
+    //     .cloned()
+    //     .collect_vec();
+
+    // let expected_cover = shifts.iter().fold(0, |acc, ex| acc | ex.dst_bits());
+    // let actual_cover = result.iter().fold(0, |acc, ex| acc | ex.dst_bits());
+    // debug_assert_eq!(expected_cover, actual_cover);
+
+    // result
 }
 
 fn select_subset<T>(items: &[T], mask: u64) -> impl Iterator<Item = &T> {
@@ -133,7 +320,7 @@ pub fn min_cost_cover(candidates: &[BitExtract]) -> Vec<usize> {
 
     solve(&items, universe, 0, &mut chosen, &mut best);
 
-    println!("min_cost_cover took {:?}", start.elapsed());
+    // println!("min_cost_cover took {:?}", start.elapsed());
 
     // A solution is guaranteed to exist, so `best` is always Some here.
     best.expect("universe is coverable by the full candidate set")

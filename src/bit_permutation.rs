@@ -235,7 +235,7 @@ impl BitExtract {
         cost
     }
 
-    fn net_ror(&self) -> u8 {
+    pub fn net_ror(&self) -> u8 {
         if let Some(result) = self.net_ror.get() {
             return result;
         }
@@ -253,6 +253,7 @@ impl BitExtract {
                 BitOp::Copy(_) => 0,
             })
             .fold(0, |a, b| a + b);
+        let net_ror = net_ror % 64;
 
         self.net_ror.set(Some(net_ror));
         net_ror
@@ -558,7 +559,7 @@ impl BitPermutation {
     }
 
     pub fn push(&mut self, part: BitPermutationPart) {
-        println!("{part:?}");
+        // println!("{part:?}");
         match part {
             BitPermutationPart::Fixed { len, bits } => {
                 self.fixed |= bits << self.len;
@@ -646,7 +647,7 @@ impl BitPermutation {
                 let &ShiftExtract { rol, dst_mask: sh_dst_mask } = shift;
                 let &BroadcastExtract { src_pos, dst_mask: bc_dst_mask } = broadcast;
 
-                // Prune shifts that only cover broadcast bit
+                // Prune shifts that only cover broadcast bits
                 if sh_dst_mask & !bc_dst_mask == 0 {
                     return None;
                 }
@@ -674,7 +675,9 @@ impl BitPermutation {
                 let ex_rol = ((rol as i32) + (src_pos as i32 + 1) + (63 - sar_lz as i32)) as u8;
 
                 let extract = BitExtract::new().with_origin(|| format!("shl {rol} + bc {src_pos}"));
-                Some(extract.ror(ex_ror).sar(ex_sar).rol(ex_rol).and(dst_mask))
+                let ex = extract.ror(ex_ror).sar(ex_sar).rol(ex_rol).and(dst_mask);
+                assert_eq!(ex.net_ror(), 0u8.wrapping_sub(rol) % 64);
+                Some(ex)
             })
             .collect_vec();
         let shifts = shifts
@@ -713,10 +716,10 @@ impl BitPermutation {
             })
             .collect_vec();
 
-        println!("shifts = {}", shifts.len());
-        println!("broadcasts = {}", broadcasts.len());
-        println!("repeats = {}", repeats.len());
-        println!("shift_broadcasts = {}", shift_broadcasts.len());
+        // println!("shifts = {}", shifts.len());
+        // println!("broadcasts = {}", broadcasts.len());
+        // println!("repeats = {}", repeats.len());
+        // println!("shift_broadcasts = {}", shift_broadcasts.len());
 
         let extracts = min_cost_cover2(&shifts, &broadcasts, &repeats, &shift_broadcasts);
 
@@ -926,7 +929,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn slow_case() {
         let perm = BitPermutation::from_parts([
             BitPermutationPart::Repeat { len: 3, src_pos: 2 },
