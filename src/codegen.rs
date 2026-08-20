@@ -1,16 +1,17 @@
-use cranelift_codegen::ir::{InstBuilder, Value};
+use cranelift_codegen::ir::{self, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 
 use crate::bit_permutation::{BitExtract, BitOp, BitPermutation};
+use crate::bit_utils::iter_set_bits;
 
 pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
-    use cranelift_codegen::ir::types::I64;
-    use cranelift_codegen::ir::{AbiParam, InstBuilder};
     use cranelift_codegen::isa;
     use cranelift_codegen::settings::{self, Configurable};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use cranelift_jit::{JITBuilder, JITModule};
     use cranelift_module::{Linkage, Module};
+    use ir::types::I64;
+    use ir::{AbiParam, InstBuilder};
 
     let mut flags = settings::builder();
     flags.set("use_colocated_libcalls", "false").unwrap();
@@ -93,16 +94,16 @@ fn lower_bit_op(builder: &mut FunctionBuilder, value: Value, op: BitOp) -> Value
         BitOp::ArithRight(amt) => builder.ins().sshr_imm_u(value, amt as i64),
         BitOp::RotateRight(amt) => builder.ins().rotr_imm_u(value, amt as i64),
         BitOp::And(mask) => builder.ins().band_imm_u(value, mask.min_bits() as i64), // fixme: not always optimal
-        BitOp::ShiftOr(0, amt) => {
-            let shifted = builder.ins().ishl_imm_u(value, amt as i64);
-            builder.ins().bor(value, shifted)
-        }
-        BitOp::ShiftOr(amt1, amt2) => {
-            let shifted1 = builder.ins().ishl_imm_u(value, amt1 as i64);
-            let shifted2 = builder.ins().ishl_imm_u(value, amt2 as i64);
-            builder.ins().bor(shifted1, shifted2)
-        }
-        BitOp::Mul(mask) => builder.ins().imul_imm_u(value, mask as i64),
+        BitOp::Copy(mask) => match mask.count_ones() {
+            0..3 => {
+                let zero = builder.ins().iconst(ir::types::I64, 0);
+                iter_set_bits(mask).fold(zero, |acc, shl| {
+                    let b = builder.ins().ishl_imm_u(value, shl as i64);
+                    builder.ins().bor(acc, b)
+                })
+            }
+            _ => builder.ins().imul_imm_u(value, mask as i64),
+        },
     }
 }
 

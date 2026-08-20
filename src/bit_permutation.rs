@@ -7,7 +7,7 @@ use fnv::FnvHashMap;
 use itertools::Itertools;
 use smallvec::SmallVec;
 
-use crate::bit_utils::is_aarch64_logical_immediate;
+use crate::bit_utils::{is_aarch64_logical_immediate, iter_set_bits};
 use crate::partial_bits::PartialBits;
 use crate::playground::min_cost_cover;
 use crate::print::PrintBits;
@@ -70,11 +70,8 @@ pub enum BitOp {
     /// Bitwise AND.
     /// It is an invariant that `!mask & !used == 0`.
     And(PartialBits),
-    /// Two shifts followed by a bitwise or;
-    /// the smaller shift preceeds the larger shift, and may be zero.
-    ShiftOr(u8, u8),
-    /// Integer multiplication.
-    Mul(u64),
+    /// Copies the bit pattern to two or more places.
+    Copy(u64),
 }
 
 /// Known and demanded bits.
@@ -131,8 +128,8 @@ impl BitExtract {
         self
     }
 
-    pub fn mul(mut self, mask: u64) -> Self {
-        self.push(BitOp::Mul(mask));
+    pub fn copy(mut self, mask: u64) -> Self {
+        self.push(BitOp::Copy(mask));
         self
     }
 
@@ -323,8 +320,7 @@ impl BitOp {
             Self::ShiftRight(0) => Self::Nop,
             Self::ArithRight(0) => Self::Nop,
             Self::RotateRight(0) => Self::Nop,
-            Self::ShiftOr(0, 0) => Self::Nop,
-            Self::Mul(1) => Self::Nop,
+            Self::Copy(1) => Self::Nop,
             // An arithmetic right shift where the input's high bit
             // is known to be zero is equivalent to a logical right shift
             Self::ArithRight(amt) if zeros & high_bit() != 0 => Self::ShiftRight(amt),
@@ -342,16 +338,10 @@ impl BitOp {
                     _ => Self::And(mask),
                 }
             }
-            // Strength-reduce multiplication where possible
-            Self::Mul(mask) => match mask.count_ones() {
-                1 => Self::ShiftLeft(mask.trailing_zeros() as u8),
-                2 => {
-                    let amt1 = mask.trailing_zeros() as u8;
-                    let amt2 = (mask & (mask - 1)).trailing_zeros() as u8;
-                    Self::ShiftOr(amt1, amt2)
-                }
-                _ => self,
-            },
+            // Strength-reduce a degenerate copy to a shift left
+            Self::Copy(mask) if mask.count_ones() == 1 => {
+                Self::ShiftLeft(mask.trailing_zeros() as u8)
+            }
             // The operation can't be optimised
             _ => self,
         };
@@ -367,8 +357,7 @@ impl BitOp {
             Self::ArithRight(amt) => ((value as i64) >> amt) as u64,
             Self::RotateRight(amt) => value.rotate_right(amt as u32),
             Self::And(mask) => value & mask.bits(),
-            Self::ShiftOr(amt1, amt2) => (value << amt1) | (value << amt2),
-            Self::Mul(mask) => value.wrapping_mul(mask),
+            Self::Copy(mask) => value.wrapping_mul(mask),
         }
     }
 
@@ -381,18 +370,9 @@ impl BitOp {
             Self::ArithRight(amt) => ((input as i64) >> amt) as u64,
             Self::RotateRight(amt) => input.rotate_right(amt as u32),
             Self::And(mask) => input | mask.zeros(),
-            Self::ShiftOr(a, b) => {
-                let a_mask = Self::ShiftLeft(a).calc_known_zeros(input);
-                let b_mask = Self::ShiftLeft(b).calc_known_zeros(input);
-                a_mask & b_mask
-            }
-            Self::Mul(mask) => {
-                let trailing_zeros = input.trailing_ones() + mask.trailing_zeros();
-                let leading_zeros = input.leading_ones() + mask.leading_zeros();
-                let lo_mask = right_mask(trailing_zeros.min(64) as u8);
-                let hi_mask = left_mask(leading_zeros.saturating_sub(64) as u8);
-                lo_mask | hi_mask
-            }
+            Self::Copy(mask) => iter_set_bits(mask)
+                .map(|shl| Self::ShiftLeft(shl).calc_known_zeros(input))
+                .fold(0, |acc, mask| acc & mask),
         }
     }
 
@@ -409,12 +389,9 @@ impl BitOp {
             }
             Self::RotateRight(amt) => output.rotate_left(amt as u32),
             Self::And(mask) => output & mask.bits(),
-            Self::ShiftOr(a, b) => {
-                let a_mask = Self::ShiftLeft(a).calc_used_bits(output);
-                let b_mask = Self::ShiftLeft(b).calc_used_bits(output);
-                a_mask | b_mask
-            }
-            Self::Mul(_) => u64::MAX >> output.leading_zeros(),
+            Self::Copy(mask) => iter_set_bits(mask)
+                .map(|shl| Self::ShiftLeft(shl).calc_used_bits(output))
+                .fold(0, |acc, mask| acc | mask),
         }
     }
 
@@ -437,17 +414,22 @@ impl BitOp {
                 Isa::AArch64 => 1 + cost_aarch64_logical_imm(*mask),
                 _ => 2,
             },
-            Self::ShiftOr(0, _) => match isa {
-                Isa::AArch64 => 1,
-                _ => 2,
-            },
-            Self::ShiftOr(_, _) => match isa {
-                Isa::AArch64 => 2,
-                _ => 3,
-            },
-            Self::Mul(mask) => match isa {
-                Isa::AArch64 => 3 + cost_aarch64_mat_imm(PartialBits::full(*mask)),
-                _ => 4,
+            Self::Copy(mask) => match (mask.count_ones(), mask.leading_zeros()) {
+                (0, _) => 1,
+                (1, 0) => 0,
+                (1, _) => 1,
+                (2, 0) => match isa {
+                    Isa::AArch64 => 1,
+                    _ => 2,
+                },
+                (2, _) => match isa {
+                    Isa::AArch64 => 2,
+                    _ => 3,
+                },
+                _ => match isa {
+                    Isa::AArch64 => 3 + cost_aarch64_mat_imm(PartialBits::full(*mask)),
+                    _ => 4,
+                },
             },
         }
 
@@ -466,8 +448,7 @@ impl BitOp {
             Self::ArithRight(amt) => amt < 64,
             Self::RotateRight(amt) => amt < 64,
             Self::And(_) => true,
-            Self::ShiftOr(a, b) => a < b && b < 64,
-            Self::Mul(_) => true,
+            Self::Copy(_) => true,
         })
     }
 }
@@ -484,9 +465,8 @@ impl Display for BitOp {
                 _ => write!(f, "ror {amt}"),
             },
             Self::And(mask) => write!(f, "and {}", PrintBits(mask)),
-            Self::ShiftOr(0, amt) => write!(f, "or (shl {amt})"),
-            Self::ShiftOr(amt1, amt2) => write!(f, "shl {amt1}, or (shl {})", amt2 - amt1), // fixme
-            Self::Mul(mask) => write!(f, "mul {}", PrintBits(mask)),
+            Self::Copy(0) => write!(f, "dup <none>"),
+            Self::Copy(mask) => write!(f, "dup {}", iter_set_bits(mask).join(", ")),
         }
     }
 }
@@ -697,7 +677,7 @@ impl BitPermutation {
                     })
                     .shr(shr)
                     .and(src_mask >> shr)
-                    .mul(rol_mask.rotate_left(shr as u32))
+                    .copy(rol_mask.rotate_left(shr as u32))
             });
         let candidates = shifts
             .chain(broadcasts)
