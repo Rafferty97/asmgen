@@ -3,12 +3,20 @@ name = "asmgen"
 version = "0.1.0"
 edition = "2024"
 
+[[bench]]
+name = "aarch64_immediates"
+harness = false
+
 [dependencies]
 arbitrary = "1.4.2"
 cranelift-codegen = { version = "0.134.3", features = ["riscv64", "x86"] }
 cranelift-frontend = "0.134.3"
 cranelift-jit = "0.134.3"
 cranelift-module = "0.134.3"
+# cranelift-codegen = { path = "../wasmtime/cranelift/codegen", features = ["riscv64", "x86"] }
+# cranelift-frontend = { path = "../wasmtime/cranelift/frontend" }
+# cranelift-jit = { path = "../wasmtime/cranelift/jit" }
+# cranelift-module = { path = "../wasmtime/cranelift/module" }
 disarm64 = "0.2.0"
 fnv = "1.0.7"
 itertools = "0.15.0"
@@ -17,3 +25,6 @@ rand = "0.10.2"
 rand_xoshiro = "0.8.1"
 smallvec = "1.15.2"
 target-lexicon = "0.13.5"
+
+[dev-dependencies]
+criterion = "0.5"

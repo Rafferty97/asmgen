@@ -66,13 +66,13 @@ impl<T> PrintBits<T> {
         write!(f, "[{part}")?;
         let (mut prev, mut cnt) = (part, 0);
 
-        for bits in parts {
-            if bits == prev {
+        for part in parts {
+            if part == prev {
                 cnt += 1;
             } else {
                 Self::write_part(f, prev, cnt)?;
-                Self::write_part(f, prev, cnt)?;
-                prev = bits;
+                Self::write_part(f, part, 1)?;
+                prev = part;
                 cnt = 0;
             }
         }
@@ -91,5 +91,37 @@ impl<T> PrintBits<T> {
             (part, 2) => write!(f, " .... {part}"),
             (part, cnt) => write!(f, " ...({})... {part}", 4 * (cnt - 1)),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_print_bits() {
+        let str = PrintBits(0).to_string();
+        assert_eq!(str, "[0000 ...(56)... 0000]");
+
+        let str = PrintBits(u64::MAX).to_string();
+        assert_eq!(str, "[1111 ...(56)... 1111]");
+
+        let str = PrintBits(0b1010_1100_0000_0000_0000_0001).to_string();
+        assert_eq!(str, "[0000 ...(32)... 0000 1010 1100 0000 .... 0000 0001]");
+    }
+
+    #[test]
+    fn test_print_partial_bits() {
+        let str = PrintBits(PartialBits::empty()).to_string();
+        assert_eq!(str, "[]");
+
+        let str = PrintBits(PartialBits::full(0).with_used(0b1111_0000)).to_string();
+        assert_eq!(str, "[0000 ****]");
+
+        let str = PrintBits(PartialBits::full(0)).to_string();
+        assert_eq!(str, "[0000 ...(56)... 0000]");
+
+        let str = PrintBits(PartialBits::full(u64::MAX)).to_string();
+        assert_eq!(str, "[1111 ...(56)... 1111]");
     }
 }

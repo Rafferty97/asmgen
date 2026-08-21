@@ -54,6 +54,10 @@ impl PartialBits {
         Self { bits, used: u64::MAX }
     }
 
+    pub fn empty() -> Self {
+        Self { bits: u64::MAX, used: 0 }
+    }
+
     pub fn with_used(self, used: u64) -> Self {
         Self::new(self.bits | !used, self.used & used)
     }

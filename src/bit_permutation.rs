@@ -8,9 +8,8 @@ use itertools::Itertools;
 use smallvec::SmallVec;
 
 use crate::bits::aarch64::is_aarch64_logical_immediate;
-use crate::bits::{PartialBits, iter_set_bits, left_mask, middle_mask, right_mask};
+use crate::bits::{PartialBits, PrintBits, iter_set_bits, left_mask, middle_mask, right_mask};
 use crate::playground::min_cost_cover;
-use crate::print::PrintBits;
 
 static ISA: Isa = Isa::AArch64;
 
@@ -439,8 +438,8 @@ impl BitOp {
         // self.cost = [c_sh1, c_sar, c_sh2_and, c_mul, c_or].iter().sum();
     }
 
-    #[cfg(debug_assertions)]
     pub fn validate(self) {
+        #[cfg(debug_assertions)]
         debug_assert!(match self {
             Self::Nop => true,
             Self::ShiftLeft(amt) => amt < 64,

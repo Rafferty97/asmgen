@@ -3,25 +3,29 @@ use std::sync::LazyLock;
 
 use crate::bits::{BitSet, right_mask};
 
-pub const AARCH64_LOGICAL_IMMS: LazyLock<HashSet<u64>> = LazyLock::new(|| {
-    let mut imms = HashSet::new();
+pub fn aarch64_logical_immediates() -> &'static HashSet<u64> {
+    static AARCH64_LOGICAL_IMMS: LazyLock<HashSet<u64>> = LazyLock::new(|| {
+        let mut imms = HashSet::new();
 
-    for size in [2, 4, 8, 16, 32, 64] {
-        for num_ones in 1..size {
-            let pattern = BitSet::new(right_mask(num_ones as u8), size);
-            let tiled = pattern.tile_u64();
-            for ror in 0..size {
-                let value = tiled.rotate_right(ror as u32);
-                imms.insert(value);
+        for size in [2, 4, 8, 16, 32, 64] {
+            for num_ones in 1..size {
+                let pattern = BitSet::new(right_mask(num_ones as u8), size);
+                let tiled = pattern.tile_u64();
+                for ror in 0..size {
+                    let value = tiled.rotate_right(ror as u32);
+                    imms.insert(value);
+                }
             }
         }
-    }
 
-    imms.remove(&0);
-    imms.remove(&u64::MAX);
+        imms.remove(&0);
+        imms.remove(&u64::MAX);
 
-    imms
-});
+        imms
+    });
+
+    &*AARCH64_LOGICAL_IMMS
+}
 
 pub fn is_aarch64_logical_immediate(value: u64) -> bool {
     if matches!(value, 0 | u64::MAX) {
@@ -62,19 +66,19 @@ pub fn is_rotated_run(value: u64, len: u8) -> bool {
 
 #[cfg(test)]
 mod test {
-    use std::u64;
+    use crate::bits::BitSet;
 
     use super::*;
 
     #[test]
     fn test_aarch64_logical_immediate_count() {
-        assert_eq!(AARCH64_LOGICAL_IMMS.len(), 5334);
+        assert_eq!(aarch64_logical_immediates().len(), 5334);
     }
 
     #[test]
     fn test_is_aarch64_logical_immediate() {
         // Check all immediates
-        for &imm in AARCH64_LOGICAL_IMMS.iter() {
+        for &imm in aarch64_logical_immediates().iter() {
             assert!(is_aarch64_logical_immediate(imm));
         }
 
@@ -87,7 +91,7 @@ mod test {
             let value = BitSet::new(bits, 8).tile_u64();
             assert_eq!(
                 is_aarch64_logical_immediate(value),
-                AARCH64_LOGICAL_IMMS.contains(&value)
+                aarch64_logical_immediates().contains(&value)
             );
         }
     }
