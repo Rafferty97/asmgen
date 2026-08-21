@@ -7,8 +7,8 @@ use fnv::FnvHashMap;
 use itertools::Itertools;
 use smallvec::SmallVec;
 
-use crate::bit_utils::{is_aarch64_logical_immediate, iter_set_bits};
-use crate::partial_bits::PartialBits;
+use crate::bits::aarch64::is_aarch64_logical_immediate;
+use crate::bits::{PartialBits, iter_set_bits, left_mask, middle_mask, right_mask};
 use crate::playground::min_cost_cover;
 use crate::print::PrintBits;
 
@@ -365,8 +365,8 @@ impl BitOp {
     fn calc_known_zeros(self, input: u64) -> u64 {
         match self {
             Self::Nop => input,
-            Self::ShiftLeft(amt) => input << amt | right_mask(amt),
-            Self::ShiftRight(amt) => input >> amt | left_mask(amt),
+            Self::ShiftLeft(amt) => input << amt | right_mask::<u64>(amt),
+            Self::ShiftRight(amt) => input >> amt | left_mask::<u64>(amt),
             Self::ArithRight(amt) => ((input as i64) >> amt) as u64,
             Self::RotateRight(amt) => input.rotate_right(amt as u32),
             Self::And(mask) => input | mask.zeros(),
@@ -384,7 +384,7 @@ impl BitOp {
             Self::ShiftLeft(amt) => output >> amt,
             Self::ShiftRight(amt) => output << amt,
             Self::ArithRight(amt) => {
-                let needs_sign = output & left_mask(amt) != 0;
+                let needs_sign = output & left_mask::<u64>(amt) != 0;
                 (output << amt) | needs_sign.then_some(high_bit()).unwrap_or(0)
             }
             Self::RotateRight(amt) => output.rotate_left(amt as u32),
@@ -539,7 +539,7 @@ impl BitPermutation {
                 self.len += len;
             }
             BitPermutationPart::Slice { len, src_pos } => {
-                let src_mask = make_mask(src_pos, len);
+                let src_mask = middle_mask::<u64>(src_pos, len);
                 let rol = self.len + 64 - src_pos;
                 *self.rot_masks.entry(rol % 64).or_insert(0) |= src_mask;
                 self.len += len;
@@ -636,7 +636,7 @@ impl BitPermutation {
                 let ex_sar = (63 - sar_lz) as u8;
 
                 // Verify that this combination is feasible
-                let bc_mask = right_mask(ex_sar).rotate_left((src_pos + 1 + rol) as u32);
+                let bc_mask = right_mask::<u64>(ex_sar).rotate_left((src_pos + 1 + rol) as u32);
                 let clobber_mask = bc_mask & !bc_dst_mask;
                 if clobber_mask & sh_dst_mask != 0 {
                     return None;
@@ -717,29 +717,6 @@ impl BitPermutation {
             dst |= (src & src_mask).rotate_left(rol as u32);
         }
         dst
-    }
-}
-
-#[inline(always)]
-fn make_mask(pos: u8, len: u8) -> u64 {
-    match (pos, len) {
-        (_, 0) => 0,
-        (0, 64) => u64::MAX,
-        _ => ((1 << len) - 1) << pos,
-    }
-}
-
-fn right_mask(len: u8) -> u64 {
-    match len {
-        64 => u64::MAX,
-        _ => (1 << len) - 1,
-    }
-}
-
-fn left_mask(len: u8) -> u64 {
-    match len {
-        64 => u64::MAX,
-        _ => !(u64::MAX >> len),
     }
 }
 

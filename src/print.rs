@@ -1,6 +1,6 @@
 use std::fmt::{self, Display, Formatter};
 
-use crate::partial_bits::PartialBits;
+use crate::bits::PartialBits;
 
 pub struct PrintBits<T>(pub T);
 

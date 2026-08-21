@@ -1,3 +1,28 @@
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
+use crate::bits::{BitSet, right_mask};
+
+pub const AARCH64_LOGICAL_IMMS: LazyLock<HashSet<u64>> = LazyLock::new(|| {
+    let mut imms = HashSet::new();
+
+    for size in [2, 4, 8, 16, 32, 64] {
+        for num_ones in 1..size {
+            let pattern = BitSet::new(right_mask(num_ones as u8), size);
+            let tiled = pattern.tile_u64();
+            for ror in 0..size {
+                let value = tiled.rotate_right(ror as u32);
+                imms.insert(value);
+            }
+        }
+    }
+
+    imms.remove(&0);
+    imms.remove(&u64::MAX);
+
+    imms
+});
+
 pub fn is_aarch64_logical_immediate(value: u64) -> bool {
     if matches!(value, 0 | u64::MAX) {
         return false;
@@ -35,24 +60,37 @@ pub fn is_rotated_run(value: u64, len: u8) -> bool {
     value.wrapping_add(1).count_ones() == 1
 }
 
-/// Returns an iterator that yeilds the index of each set bit in the `mask`,
-/// in ascending order (least significant to most significant).
-pub fn iter_set_bits(mask: u64) -> impl Iterator<Item = u8> {
-    let mut mask = mask;
-    std::iter::from_fn(move || match mask {
-        0 => None,
-        bits => {
-            mask &= mask - 1;
-            Some(bits.trailing_zeros() as u8)
-        }
-    })
-}
-
 #[cfg(test)]
 mod test {
-    use itertools::Itertools;
+    use std::u64;
 
     use super::*;
+
+    #[test]
+    fn test_aarch64_logical_immediate_count() {
+        assert_eq!(AARCH64_LOGICAL_IMMS.len(), 5334);
+    }
+
+    #[test]
+    fn test_is_aarch64_logical_immediate() {
+        // Check all immediates
+        for &imm in AARCH64_LOGICAL_IMMS.iter() {
+            assert!(is_aarch64_logical_immediate(imm));
+        }
+
+        // Check all zeros and all ones
+        assert!(!is_aarch64_logical_immediate(0));
+        assert!(!is_aarch64_logical_immediate(u64::MAX));
+
+        // Check all 8-bit tilings
+        for bits in 0..256 {
+            let value = BitSet::new(bits, 8).tile_u64();
+            assert_eq!(
+                is_aarch64_logical_immediate(value),
+                AARCH64_LOGICAL_IMMS.contains(&value)
+            );
+        }
+    }
 
     #[test]
     fn test_is_rotated_run() {
@@ -110,20 +148,5 @@ mod test {
             }
             value = next_value;
         }
-    }
-
-    #[test]
-    fn test_iter_set_bits() {
-        let iter = iter_set_bits(0);
-        assert_eq!(iter.collect_vec(), &[]);
-
-        let iter = iter_set_bits(0b10010100110);
-        assert_eq!(iter.collect_vec(), &[1, 2, 5, 7, 10]);
-
-        let iter = iter_set_bits(0b10010111);
-        assert_eq!(iter.collect_vec(), &[0, 1, 2, 4, 7]);
-
-        let iter = iter_set_bits(u64::MAX);
-        assert_eq!(iter.count(), 64);
     }
 }

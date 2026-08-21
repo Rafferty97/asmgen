@@ -1,5 +1,34 @@
 use std::ops::{BitAnd, BitOr};
 
+use crate::bits::mask::right_mask;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BitSet {
+    /// The bits in the bit set, stored in the least significant bits of the word.
+    /// All unused bits are cleared.
+    bits: u64,
+    /// The length of the bit set, between `0` and `64`.
+    len: u8,
+}
+
+impl BitSet {
+    pub fn new(bits: u64, len: usize) -> Self {
+        let len = len.min(64) as u8;
+        let bits = bits & right_mask::<u64>(len);
+        Self { bits, len }
+    }
+
+    /// Repeats this pattern to fill a 64-bit word.
+    pub fn tile_u64(self) -> u64 {
+        let Self { mut bits, mut len } = self;
+        while len < 64 {
+            bits |= bits << len;
+            len <<= 1;
+        }
+        bits
+    }
+}
+
 /// A bitset, where some of the bits may be unused and thus free to assume any value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PartialBits {

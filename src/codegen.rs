@@ -2,7 +2,7 @@ use cranelift_codegen::ir::{self, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 
 use crate::bit_permutation::{BitExtract, BitOp, BitPermutation};
-use crate::bit_utils::iter_set_bits;
+use crate::bits::iter_set_bits;
 
 pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
     use cranelift_codegen::isa;
