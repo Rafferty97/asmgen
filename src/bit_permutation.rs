@@ -16,9 +16,9 @@ static ISA: Isa = Isa::AArch64;
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct BitPermutation {
-    len: u8,
-    fixed: u64,
-    rot_masks: FnvHashMap<u8, u64>,
+    pub len: u8,
+    pub fixed: u64,
+    pub rot_masks: FnvHashMap<u8, u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

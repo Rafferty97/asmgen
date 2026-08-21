@@ -7,7 +7,7 @@ fn main() {
         BitPermutationPart::Repeat { len: 16, src_pos: 16 },
     ]);
 
-    let code = compile_bit_permutation(&perm);
+    let code = compile_bit_permutation("two_broadcasts", &perm);
     println!("{code}");
     // movz		w6, #0x1, lsl #0x0
     // movk		w6, #0x1, lsl #0x10
@@ -21,7 +21,7 @@ fn main() {
         BitPermutationPart::Slice { len: 16, src_pos: 10 },
     ]);
 
-    let code = compile_bit_permutation(&perm);
+    let code = compile_bit_permutation("repeat_slice", &perm);
     println!("{code}");
     // ubfm		x4, x0, #10, #63
     // and		x4, x4, #0xffff
@@ -33,7 +33,7 @@ fn main() {
         BitPermutationPart::Repeat { len: 2, src_pos: 0 },
     ]);
 
-    let code = compile_bit_permutation(&perm);
+    let code = compile_bit_permutation("broadcast_62_and_2", &perm);
     println!("{code}");
     // ubfm		x7, x0, #18, #17
     // sbfm		x7, x7, #63, #63
@@ -48,7 +48,7 @@ fn main() {
         BitPermutationPart::Repeat { len: 52, src_pos: 31 },
     ]);
 
-    let code = compile_bit_permutation(&i_imm);
+    let code = compile_bit_permutation("i_imm", &i_imm);
     println!("{code}");
     // ubfm		x3, x0, #32, #31
     // sbfm		x0, x3, #52, #63
@@ -60,7 +60,7 @@ fn main() {
         BitPermutationPart::Repeat { len: 52, src_pos: 31 },
     ]);
 
-    let code = compile_bit_permutation(&s_imm);
+    let code = compile_bit_permutation("s_imm", &s_imm);
     println!("{code}");
     // ubfm		x9, x0, #7, #63
     // movz		w10, #0x1f, lsl #0x0
@@ -80,7 +80,7 @@ fn main() {
         BitPermutationPart::Repeat { len: 52, src_pos: 31 },
     ]);
 
-    let code = compile_bit_permutation(&b_imm);
+    let code = compile_bit_permutation("b_imm", &b_imm);
     println!("{code}");
     // ubfm		x14, x0, #7, #63
     // movz		w15, #0x1e, lsl #0x0
@@ -106,7 +106,7 @@ fn main() {
     // and		x0, x3, #0xfffffffffffff000
     // ret		x30
 
-    let code = compile_bit_permutation(&u_imm);
+    let code = compile_bit_permutation("u_imm", &u_imm);
     println!("{code}");
 
     let j_imm = BitPermutation::from_parts([
@@ -118,7 +118,7 @@ fn main() {
         BitPermutationPart::Repeat { len: 52, src_pos: 31 },
     ]);
 
-    let code = compile_bit_permutation(&j_imm);
+    let code = compile_bit_permutation("j_imm", &j_imm);
     println!("{code}");
     // ubfm		x15, x0, #9, #63
     // movz		w1, #0x800, lsl #0x0

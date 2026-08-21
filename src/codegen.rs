@@ -1,10 +1,58 @@
+use std::collections::HashMap;
+
 use cranelift_codegen::ir::{self, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
+use itertools::Itertools;
 
 use crate::bit_permutation::{BitExtract, BitOp, BitPermutation};
 use crate::bit_utils::iter_set_bits;
 
-pub fn compile_bit_permutation(permutation: &BitPermutation) -> String {
+pub fn compile_bit_permutation(name: &str, permutation: &BitPermutation) -> String {
+    let mut groups = HashMap::new();
+    for (&rol, &src_mask) in &permutation.rot_masks {
+        *groups.entry(src_mask).or_insert(0) |= 1u64 << rol;
+    }
+
+    let mut lines = Vec::<String>::new();
+
+    lines.push(format!("#[inline(never)]"));
+    lines.push(format!("pub fn decode_{name}(input: u64) -> u64 {{"));
+    lines.push(format!("    let mut out: u64 = {};", permutation.fixed));
+    for (src_mask, rols) in groups {
+        let num_src_bits = src_mask.count_ones();
+        let num_rols = rols.count_ones();
+        if num_src_bits == 0 || num_rols == 0 {
+            continue;
+        }
+        if num_src_bits < num_rols {
+            // broadcasts
+            for src_bit in iter_set_bits(src_mask) {
+                let shl = 63 - src_bit;
+                let mask = rols.rotate_left(src_bit as u32);
+                let broadcast = format!("(((input as i64) << {shl}) >> 63) as u64");
+                lines.push(format!("    out |= ({broadcast}) & {mask:#x};"));
+            }
+        } else {
+            // shifts
+            let mut masked = format!("input & {src_mask:#x}");
+            if num_rols > 1 {
+                lines.push(format!("    let masked = {masked};"));
+                masked = "masked".into();
+            }
+            for rol in iter_set_bits(rols) {
+                match rol {
+                    0 => lines.push(format!("    out |= {masked};")),
+                    rol => lines.push(format!("    out |= ({masked}).rotate_left({rol});")),
+                }
+            }
+        }
+    }
+    lines.push("    out".into());
+    lines.push("}".into());
+    lines.push("".into());
+
+    return lines.into_iter().join("\n");
+
     use cranelift_codegen::isa;
     use cranelift_codegen::settings::{self, Configurable};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
