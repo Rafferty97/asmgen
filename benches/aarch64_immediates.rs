@@ -1,4 +1,4 @@
-use asmgen::bits::aarch64::{aarch64_logical_immediates, is_aarch64_logical_immediate};
+use asmgen::util::aarch64::{aarch64_logical_immediates, is_aarch64_logical_immediate};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use itertools::Itertools;
 use rand::seq::SliceRandom;

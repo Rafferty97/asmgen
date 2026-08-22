@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use crate::bits::{BitSet, right_mask};
+use crate::util::{BitSet, right_mask};
 
 pub fn aarch64_logical_immediates() -> &'static HashSet<u64> {
     static AARCH64_LOGICAL_IMMS: LazyLock<HashSet<u64>> = LazyLock::new(|| {
@@ -66,7 +66,7 @@ pub fn is_rotated_run(value: u64, len: u8) -> bool {
 
 #[cfg(test)]
 mod test {
-    use crate::bits::BitSet;
+    use crate::util::BitSet;
 
     use super::*;
 

@@ -7,10 +7,10 @@ use fnv::FnvHashMap;
 use itertools::Itertools;
 use smallvec::SmallVec;
 
-use crate::bits::aarch64::is_aarch64_logical_immediate;
-use crate::bits::{PartialBits, PrimIntExt, PrintBits};
-use crate::bits::{iter_set_bits, left_mask, middle_mask, right_mask};
-use crate::ratio::Ratio;
+use crate::util::Ratio;
+use crate::util::aarch64::is_aarch64_logical_immediate;
+use crate::util::{PartialBits, PrimIntExt, PrintBits};
+use crate::util::{iter_set_bits, left_mask, middle_mask, right_mask};
 
 static ISA: Isa = Isa::AArch64;
 

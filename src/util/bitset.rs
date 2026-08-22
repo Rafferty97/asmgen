@@ -1,6 +1,6 @@
 use std::ops::{BitAnd, BitOr};
 
-use crate::bits::mask::right_mask;
+use crate::util::mask::right_mask;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BitSet {
