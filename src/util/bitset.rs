@@ -1,4 +1,4 @@
-use std::ops::{BitAnd, BitOr};
+use std::ops::{BitAnd, BitOr, Shl, Shr};
 
 use crate::util::mask::right_mask;
 
@@ -45,12 +45,16 @@ impl Default for PartialBits {
 }
 
 impl PartialBits {
+    pub const ZERO: Self = Self::full(0);
+
+    pub const MAX: Self = Self::full(u64::MAX);
+
     pub fn new(bits: u64, used: u64) -> Self {
         debug_assert_eq!(!bits & !used, 0);
         Self { bits, used }
     }
 
-    pub fn full(bits: u64) -> Self {
+    pub const fn full(bits: u64) -> Self {
         Self { bits, used: u64::MAX }
     }
 
@@ -95,6 +99,12 @@ impl PartialBits {
     }
 }
 
+impl From<u64> for PartialBits {
+    fn from(value: u64) -> Self {
+        Self::full(value)
+    }
+}
+
 impl BitOr for PartialBits {
     type Output = Self;
 
@@ -112,6 +122,22 @@ impl BitAnd for PartialBits {
         let bits = self.bits & rhs.bits;
         let used = !bits | (self.used & rhs.used);
         Self::new(bits, used)
+    }
+}
+
+impl Shl<u8> for PartialBits {
+    type Output = Self;
+
+    fn shl(self, rhs: u8) -> Self {
+        Self::new(self.bits << rhs, !(!self.used << rhs))
+    }
+}
+
+impl Shr<u8> for PartialBits {
+    type Output = Self;
+
+    fn shr(self, rhs: u8) -> Self {
+        Self::new(self.bits >> rhs, !(!self.used >> rhs))
     }
 }
 

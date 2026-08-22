@@ -61,7 +61,7 @@ pub fn is_rotated_run(value: u64, len: u8) -> bool {
     let value = value.rotate_right(value.trailing_zeros());
 
     // A sequences of zeros followed by a sequence of ones is one less than a power of two
-    value.wrapping_add(1).count_ones() == 1
+    (value.wrapping_add(1) as u64).is_power_of_two()
 }
 
 #[cfg(test)]

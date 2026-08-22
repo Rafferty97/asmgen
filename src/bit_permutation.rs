@@ -288,6 +288,7 @@ impl BitOp {
     /// Fuses two instructions, if possible.
     fn try_fuse(first: Self, second: Self) -> Option<Self> {
         match (first, second) {
+            // Two sucessive shifts in the same direction can be fused.
             (Self::ShiftLeft(a), Self::ShiftLeft(b)) => Some(match a + b {
                 sum @ 0..64 => Self::ShiftLeft(sum),
                 _ => Self::set_to_zero(),
@@ -300,13 +301,39 @@ impl BitOp {
                 let sum = (a + b).min(63);
                 Some(Self::ArithRight(sum))
             }
+            // Two opposed shifts are equivalent to a mask.
+            // Note that a left shift followed by an arithmetic right shift
+            // cannot be simplified even though the reverse can be.
+            (Self::ShiftLeft(a), Self::ShiftRight(b)) if a == b => {
+                Some(Self::And(PartialBits::full(u64::MAX >> a)))
+            }
+            (Self::ShiftRight(a) | Self::ArithRight(a), Self::ShiftLeft(b)) if a == b => {
+                Some(Self::And(PartialBits::full(u64::MAX << a)))
+            }
             (Self::RotateRight(a), Self::RotateRight(b)) => {
                 let sum = (a + b) % 64;
                 Some(Self::RotateRight(sum))
             }
+            // Two successive masks can be fused.
             (Self::And(a), Self::And(b)) => Some(Self::And(a & b)),
+            // A shift/mask pair that can be rewritten as two shifts can sometimes
+            // be lowered to better machine code, and will never be worse.
+            (Self::And(m), Self::ShiftLeft(k)) => Self::try_fuse_shift_and_mask(64 - k, m << k),
+            (Self::ShiftLeft(k), Self::And(m)) => {
+                let mask = m & PartialBits::MAX << k;
+                Self::try_fuse_shift_and_mask(64 - k, mask)
+            }
+            (Self::And(m), Self::ShiftRight(k)) => Self::try_fuse_shift_and_mask(k, m >> k),
+            (Self::ShiftRight(k), Self::And(m)) => {
+                let mask = m & PartialBits::MAX << k;
+                Self::try_fuse_shift_and_mask(k, mask)
+            }
             _ => None,
         }
+    }
+
+    fn try_fuse_shift_and_mask(ror: u8, mask: PartialBits) -> Option<Self> {
+        None // todo
     }
 
     /// Optimise the operation, given the known input bits and demanded output bits.
@@ -340,7 +367,7 @@ impl BitOp {
                 }
             }
             // Strength-reduce a degenerate copy to a shift left
-            Self::Copy(mask) if mask.count_ones() == 1 => {
+            Self::Copy(mask) if mask.is_power_of_two() => {
                 Self::ShiftLeft(mask.trailing_zeros() as u8)
             }
             // The operation can't be optimised
