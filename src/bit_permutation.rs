@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::u64;
 
+use arbitrary::Arbitrary;
 use fnv::FnvHashMap;
 use itertools::Itertools;
 use smallvec::SmallVec;
@@ -764,6 +765,32 @@ fn min_cost_cover(mut candidates: Vec<BitExtract>) -> Vec<BitExtract> {
     }
 
     chosen
+}
+
+impl<'a> Arbitrary<'a> for BitPermutation {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let mut result = Self::new();
+        let len = u.int_in_range(0..=64)?;
+
+        while result.len() < len {
+            let part = BitPermutationPart::arbitrary(u)?.trunc(len - result.len());
+            result.push(part);
+        }
+
+        Ok(result)
+    }
+}
+
+impl<'a> Arbitrary<'a> for BitPermutationPart {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let len = u.int_in_range(1..=64)?;
+        Ok(match u.int_in_range(0..=2)? {
+            0 => Self::Fixed { len, bits: u.arbitrary()? },
+            1 => Self::Slice { len, src_pos: u.int_in_range(0..=64 - len)? },
+            2 => Self::Repeat { len, src_pos: u.int_in_range(0..=63)? },
+            _ => unreachable!(),
+        })
+    }
 }
 
 #[cfg(test)]
