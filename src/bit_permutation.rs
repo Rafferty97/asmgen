@@ -8,8 +8,9 @@ use itertools::Itertools;
 use smallvec::SmallVec;
 
 use crate::bits::aarch64::is_aarch64_logical_immediate;
-use crate::bits::{PartialBits, PrintBits, iter_set_bits, left_mask, middle_mask, right_mask};
-use crate::playground::min_cost_cover;
+use crate::bits::{PartialBits, PrimIntExt, PrintBits};
+use crate::bits::{iter_set_bits, left_mask, middle_mask, right_mask};
+use crate::ratio::Ratio;
 
 static ISA: Isa = Isa::AArch64;
 
@@ -693,11 +694,7 @@ impl BitPermutation {
         // println!("");
 
         // Find minimum cost
-        let mut candidates = candidates;
-        let extracts: Vec<_> = min_cost_cover(&candidates)
-            .into_iter()
-            .map(|idx| std::mem::take(&mut candidates[idx]))
-            .collect();
+        let extracts = min_cost_cover(candidates);
 
         // println!("EXTRACTS");
         // println!("----------");
@@ -724,6 +721,49 @@ pub enum Isa {
     AArch64,
     #[default]
     Unknown,
+}
+
+fn min_cost_cover(mut candidates: Vec<BitExtract>) -> Vec<BitExtract> {
+    // The bits we must cover are exactly those some candidate can supply.
+    let universe: u64 = candidates.iter().fold(0, |acc, c| acc | c.dst_bits());
+    if universe == 0 {
+        // No candidate covers anything: nothing needs covering, empty solution.
+        return Vec::new();
+    }
+
+    // Initial state
+    let mut cover = 0;
+    let mut chosen = Vec::<BitExtract>::new();
+
+    while cover != universe {
+        // Filter out dead candidates
+        candidates.retain(|c| !cover.covers(c.dst_bits()));
+
+        // Score the remaining candidates
+        let candidate_costs = candidates.iter().map(|c| {
+            let added_bits = (c.dst_bits() & !cover).count_ones() as u16;
+            let added_cost = c.cost();
+            let saved_cost = chosen
+                .iter()
+                .filter(|d| c.dst_bits().covers(d.dst_bits()))
+                .map(|d| d.cost())
+                .sum::<u16>();
+            let net_cost = added_cost.saturating_sub(saved_cost);
+            (c, Ratio::new(net_cost as i32, added_bits as i32))
+        });
+
+        // Pick the best
+        let (best, _) = candidate_costs.min_by_key(|&(_, cost)| cost).unwrap();
+
+        // Add it to the set and remove subsumed candidates
+        chosen.retain(|c| !best.dst_bits().covers(c.dst_bits()));
+        chosen.push(best.clone());
+
+        // Update the new cover
+        cover |= best.dst_bits();
+    }
+
+    chosen
 }
 
 #[cfg(test)]
