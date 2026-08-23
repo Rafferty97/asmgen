@@ -157,7 +157,7 @@ mod test {
     #[test]
     #[should_panic]
     fn invalid_into() {
-        u8::from(Bits::<12>::new(40));
+        let _ = u8::from(Bits::<12>::new(40));
     }
 
     #[test]

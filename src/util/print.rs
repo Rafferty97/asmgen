@@ -46,8 +46,7 @@ impl Display for PrintBits<PartialBits> {
         let parts = (0..64)
             .step_by(4)
             .rev()
-            .map(|i| Part((self.0.bits() >> i) & 0b1111, (self.0.used() >> i) & 0b1111))
-            .skip_while(|&Part(_, u)| u == 0);
+            .map(|i| Part((self.0.bits() >> i) & 0b1111, (self.0.used() >> i) & 0b1111));
 
         Self::write_parts(f, parts)
     }
@@ -113,10 +112,10 @@ mod test {
     #[test]
     fn test_print_partial_bits() {
         let str = PrintBits(PartialBits::empty()).to_string();
-        assert_eq!(str, "[]");
+        assert_eq!(str, "[**** ...(56)... ****]");
 
         let str = PrintBits(PartialBits::full(0).with_used(0b1111_0000)).to_string();
-        assert_eq!(str, "[0000 ****]");
+        assert_eq!(str, "[**** ...(48)... **** 0000 ****]");
 
         let str = PrintBits(PartialBits::full(0)).to_string();
         assert_eq!(str, "[0000 ...(56)... 0000]");

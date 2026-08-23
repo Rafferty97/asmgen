@@ -6,15 +6,13 @@ use std::u64;
 use arbitrary::Arbitrary;
 use fnv::FnvHashMap;
 use itertools::Itertools;
-use smallvec::SmallVec;
 
 pub use self::bit_op::BitOp;
-use crate::bit_permutation::bit_op::RewriteResult;
 use crate::peephole::run_peephole;
 use crate::util::aarch64::is_aarch64_logical_immediate;
-use crate::util::{BitRun, Bits6, Ratio};
+use crate::util::{Bits6, Ratio};
 use crate::util::{PartialBits, PrimIntExt, PrintBits};
-use crate::util::{iter_set_bits, left_mask, middle_mask, right_mask};
+use crate::util::{middle_mask, right_mask};
 
 mod bit_op;
 
@@ -134,8 +132,6 @@ impl BitExtract {
 
     /// Optimises the `BitExtract` by fusing operations where possible.
     pub fn optimise(&mut self) {
-        let mut kd_bits = Vec::<KDBits>::new();
-
         // println!("ORIGINAL {}", self.origin);
         // for &op in &self.ops {
         //     println!("    {op}");
@@ -149,39 +145,33 @@ impl BitExtract {
             // Fuse and optimise instructions
             run_peephole(
                 &mut self.ops,
-                |[op1, op2]| match BitOp::try_fuse(op1, op2) {
-                    RewriteResult::Preserve => [op1, op2],
-                    RewriteResult::One(fused) => {
-                        log::trace!("OPT:     Fused into \"{fused}\"");
-                        [BitOp::Nop, fused]
-                    }
-                    RewriteResult::Two(first, second) => {
-                        log::trace!("OPT:     Rewritten to \"{first}\", \"{second}\"");
-                        [first, second]
-                    }
-                },
+                |[op1, op2]| BitOp::try_fuse(op1, op2),
                 BitOp::Nop,
             );
 
-            // Forward pass
-            kd_bits.resize(self.ops.len(), Default::default());
+            log::trace!("OPT: After fusion: {}", self);
+
+            // Reverse pass to collect used bits
+            let mut used_bits = self
+                .ops
+                .iter()
+                .rev()
+                .scan(u64::MAX, |acc, op| {
+                    let used = *acc;
+                    *acc = op.calc_used_bits(used);
+                    Some(used)
+                })
+                .collect_vec();
+            used_bits.reverse();
+
+            // Forward pass to apply optimisations
             let mut zeros = 0;
-            for (index, &op) in self.ops.iter().enumerate() {
-                kd_bits[index].zeros = zeros;
+            for (op, used) in self.ops.iter_mut().zip(used_bits) {
+                *op = op.optimise(KDBits { zeros, used });
                 zeros = op.calc_known_zeros(zeros);
             }
 
-            // Reverse pass
-            let mut used = u64::MAX;
-            for (index, &op) in self.ops.iter().enumerate().rev() {
-                kd_bits[index].used = used;
-                used = op.calc_used_bits(used);
-            }
-
-            // Optimise instructions
-            for (op, &kd_bits) in self.ops.iter_mut().zip(&kd_bits) {
-                *op = op.optimise(kd_bits);
-            }
+            log::trace!("OPT: After optimisation: {}", self);
 
             if self.ops == original {
                 log::trace!("OPT: Nothing changed in last pass; terminating");
@@ -529,7 +519,13 @@ impl BitPermutation {
 
 impl Arbitrary<'_> for BitExtract {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let ops = u.arbitrary_iter()?.collect::<Result<_, _>>()?;
+        let mut ops: Vec<_> = u.arbitrary_iter()?.collect::<Result<_, _>>()?;
+        for op in &mut ops {
+            *op = match *op {
+                BitOp::And(mask) => BitOp::And(mask.min_bits().into()),
+                op => op,
+            };
+        }
         Ok(Self { ops, ..Default::default() })
     }
 }

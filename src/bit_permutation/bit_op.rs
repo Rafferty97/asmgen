@@ -32,7 +32,7 @@ impl BitOp {
 
     /// Optimise the operation, given the known input bits and demanded output bits.
     pub fn optimise(self, KDBits { zeros, used }: KDBits) -> Self {
-        log::trace!("OPT:   Trying to optimise \"{self}\" (zeros={zeros:#x}, used = {used:#x})");
+        log::trace!("OPT:   Trying to optimise \"{self}\" (zeros={zeros:#x}, used={used:#x})");
 
         let elide = |reason: &str| {
             log::trace!("OPT:     Elided, because {reason}");
@@ -187,114 +187,121 @@ impl BitOp {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum RewriteResult {
-    Preserve,
-    One(BitOp),
-    Two(BitOp, BitOp),
-}
-
 impl BitOp {
     /// Fuses two instructions, if possible.
-    pub fn try_fuse(first: Self, second: Self) -> RewriteResult {
-        use RewriteResult::*;
+    pub fn try_fuse(first: Self, second: Self) -> [Self; 2] {
+        log::trace!("OPT:   Trying to fuse \"{first}\", \"{second}\"");
+
+        let preserve = [first, second];
+
+        let fuse = |op: Self, reason: &str| {
+            log::trace!("OPT:     Fused into \"{op}\", because {reason}");
+            [Self::Nop, op]
+        };
+
+        let sum_shifts = |a: Bits6, b: Bits6, ctor: fn(Bits6) -> BitOp| match a.checked_add(b) {
+            Some(sum) => fuse(ctor(sum), &format!("{a} + {b} = {sum}")),
+            None => fuse(
+                Self::set_to_zero(),
+                &format!("all bits are shifted out ({a} + {b} >= 64)"),
+            ),
+        };
+
+        let shifts_to_mask = |op: Self| fuse(op, "the two shifts are equivalent to a mask");
 
         match (first, second) {
             // Two sucessive shifts in the same direction can be fused.
-            (Self::ShiftLeft(a), Self::ShiftLeft(b)) => One(match a.checked_add(b) {
-                Some(sum) => Self::ShiftLeft(sum),
-                None => Self::set_to_zero(),
-            }),
-            (Self::ShiftRight(a), Self::ShiftRight(b)) => One(match a.checked_add(b) {
-                Some(sum) => Self::ShiftRight(sum),
-                None => Self::set_to_zero(),
-            }),
-            (Self::ArithRight(a), Self::ArithRight(b)) => {
-                One(Self::ArithRight(a.saturating_add(b)))
-            }
+            (Self::ShiftLeft(a), Self::ShiftLeft(b)) => sum_shifts(a, b, Self::ShiftLeft),
+            (Self::ShiftRight(a), Self::ShiftRight(b)) => sum_shifts(a, b, Self::ShiftRight),
+            (Self::ArithRight(a), Self::ArithRight(b)) => match a.saturating_add(b) {
+                sum @ Bits6::MAX => fuse(Self::ArithRight(sum), "{a} + {b} >= 63"),
+                sum => fuse(Self::ArithRight(sum), "{a} + {b} = {sum}"),
+            },
             // Two opposed shifts are equivalent to a mask.
             // Note that a left shift followed by an arithmetic right shift
             // cannot be simplified even though the reverse can be.
             (Self::ShiftLeft(a), Self::ShiftRight(b)) if a == b => {
-                One(Self::And(PartialBits::full(u64::MAX >> a)))
+                shifts_to_mask(Self::And(PartialBits::full(u64::MAX >> a)))
             }
             (Self::ShiftRight(a) | Self::ArithRight(a), Self::ShiftLeft(b)) if a == b => {
-                One(Self::And(PartialBits::full(u64::MAX << a)))
+                shifts_to_mask(Self::And(PartialBits::full(u64::MAX << a)))
             }
             (Self::RotateRight(a), Self::RotateRight(b)) => {
-                One(Self::RotateRight(a.wrapping_add(b)))
+                let sum = a.wrapping_add(b);
+                let reason = format!("{a} + {b} = {sum} (mod 64)");
+                fuse(Self::RotateRight(sum), &reason)
             }
             // Two successive masks can be fused.
-            (Self::And(a), Self::And(b)) => One(Self::And(a & b)),
+            (Self::And(a), Self::And(b)) => fuse(Self::And(a & b), "masks can always be fused"),
             // A shift/mask pair that can be rewritten as two shifts can sometimes
             // be lowered to better machine code, and will never be worse.
             (Self::And(mask), Self::ShiftLeft(shl)) => {
-                Self::try_fuse_shl_and_mask(shl, mask << shl)
+                let m = mask & (PartialBits::MAX >> shl);
+                Self::try_fuse_mask_and_rot(m, shl.neg()).unwrap_or(preserve)
             }
             (Self::ShiftLeft(shl), Self::And(mask)) => {
-                Self::try_fuse_shl_and_mask(shl, mask & (PartialBits::MAX << shl))
+                let m = (mask >> shl) & (PartialBits::MAX >> shl);
+                // log::trace!("xxx m:\t{}", PrintBits(mask));
+                // log::trace!("xxx mb:\t{}", PrintBits(mask.bits()));
+                // log::trace!("xxx mu:\t{}", PrintBits(mask.used()));
+                Self::try_fuse_mask_and_rot(m, shl.neg()).unwrap_or(preserve)
             }
             (Self::And(mask), Self::ShiftRight(shr)) => {
-                Self::try_fuse_shr_and_mask(shr, mask >> shr)
+                let m = mask & (PartialBits::MAX << shr);
+                Self::try_fuse_mask_and_rot(m, shr).unwrap_or(preserve)
             }
             (Self::ShiftRight(shr), Self::And(mask)) => {
-                Self::try_fuse_shr_and_mask(shr, mask & (PartialBits::MAX >> shr))
+                let m = (mask << shr) & (PartialBits::MAX << shr);
+                Self::try_fuse_mask_and_rot(m, shr).unwrap_or(preserve)
             }
-            _ => Preserve,
+            _ => preserve,
         }
     }
 
-    fn try_fuse_shl_and_mask(shl: Bits6, mask: PartialBits) -> RewriteResult {
-        use RewriteResult::*;
+    fn try_fuse_mask_and_rot(mask: PartialBits, ror: Bits6) -> Option<[Self; 2]> {
+        log::trace!("OPT:      (effective pre-mask: {})", PrintBits(mask));
+        log::trace!("OPT:      (effective right rotation: {ror})");
 
-        if shl == Bits6::ZERO {
-            return One(BitOp::And(mask));
-        }
+        let fuse = |op: Self, reason: &str| {
+            log::trace!("OPT:     Fused into \"{op}\", because {reason}");
+            Some([Self::Nop, op])
+        };
 
-        match mask.as_bit_run() {
-            BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => One(BitOp::set_to_zero()),
-            BitRun::Left { min, max } => match max >= 64 - u8::from(shl) {
-                true => One(Self::ShiftLeft(shl)),
-                false => Two(
-                    Self::ShiftRight((64 + min - u8::from(shl)).into()),
-                    Self::ShiftLeft((64 - min).into()),
-                ),
-            },
-            BitRun::Right { min, max } => match max == 64 {
-                true => One(Self::ShiftLeft(shl)),
-                false => Two(
-                    Self::ShiftLeft((64 + u8::from(shl) - min).into()),
-                    Self::ShiftRight((64 - min).into()),
-                ),
-            },
-            BitRun::None => Preserve,
-        }
-    }
-
-    fn try_fuse_shr_and_mask(shr: Bits6, mask: PartialBits) -> RewriteResult {
-        use RewriteResult::*;
-
-        if shr == Bits6::ZERO {
-            return One(BitOp::And(mask));
-        }
+        let rewrite = |op1: Self, op2: Self, reason: &str| {
+            log::trace!("OPT:     Rewritten to \"{op1}, {op2}\", because {reason}");
+            Some([op1, op2])
+        };
 
         match mask.as_bit_run() {
-            BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => One(BitOp::set_to_zero()),
-            BitRun::Right { min, max } => match max >= 64 - u8::from(shr) {
-                true => One(Self::ShiftRight(shr)),
-                false => Two(
-                    Self::ShiftLeft((64 + min - u8::from(shr)).into()),
-                    Self::ShiftRight((64 - min).into()),
-                ),
-            },
-            BitRun::Left { min, max } => match max == 64 {
-                true => One(Self::ShiftRight(shr)),
-                false => Two(
-                    Self::ShiftRight((64 + u8::from(shr) - min).into()),
-                    Self::ShiftLeft((64 - min).into()),
-                ),
-            },
-            BitRun::None => Preserve,
+            BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => fuse(
+                BitOp::set_to_zero(),
+                "all bits are either shifted out, masked or unused",
+            ),
+            BitRun::Left { min, max } if (min..=max).contains(&ror.into()) => fuse(
+                BitOp::ShiftLeft(ror.neg()),
+                "none of the bits not shifted out need to be masked",
+            ),
+            BitRun::Right { min, max } if (min..=max).contains(&ror.neg().into()) => fuse(
+                BitOp::ShiftRight(ror),
+                "none of the bits not shifted out need to be masked",
+            ),
+            // BitRun::Right { min, max } => match max >= 64 - u8::from(shr) {
+            //     true => fuse(Self::ShiftRight(shr), ""),
+            //     false => rewrite(
+            //         Self::ShiftLeft((64 + min - u8::from(shr)).into()),
+            //         Self::ShiftRight((64 - min).into()),
+            //         "",
+            //     ),
+            // },
+            // BitRun::Left { min, max } => match max == 64 {
+            //     true => fuse(Self::ShiftRight(shr), ""),
+            //     false => rewrite(
+            //         Self::ShiftRight((64 + u8::from(shr) - min).into()),
+            //         Self::ShiftLeft((64 - min).into()),
+            //         "",
+            //     ),
+            // },
+            _ => None,
         }
     }
 }
