@@ -3,6 +3,8 @@ use std::{
     ops::{Add, Shl, Shr, Sub},
 };
 
+use arbitrary::Arbitrary;
+
 /// An integer that is `N` bits wide.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Bits<const N: u32>(u32);
@@ -122,6 +124,12 @@ arith_impls!(i16);
 arith_impls!(i32);
 arith_impls!(i64);
 arith_impls!(isize);
+
+impl<const N: u32> Arbitrary<'_> for Bits<N> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self(u.int_in_range(Self::MIN.0..=Self::MAX.0)?))
+    }
+}
 
 #[cfg(test)]
 mod test {

@@ -9,21 +9,22 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = "1.4.2"
+env_logger = "0.11.11"
 libfuzzer-sys = "0.4"
 
 [dependencies.asmgen]
 path = ".."
 
 [[bin]]
-name = "fuzz_target_1"
-path = "fuzz_targets/fuzz_target_1.rs"
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "roundtrip"
-path = "fuzz_targets/roundtrip.rs"
+name = "optimise_bitops"
+path = "fuzz_targets/optimise_bitops.rs"
 test = false
 doc = false
 bench = false

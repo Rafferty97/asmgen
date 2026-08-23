@@ -1,9 +1,11 @@
 use std::fmt::Debug;
 
+use arbitrary::Arbitrary;
+
 use super::*;
 use crate::util::{BitRun, Bits6, PartialBits, iter_set_bits, left_mask, right_mask};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Arbitrary)]
 pub enum BitOp {
     /// No operation.
     Nop,
@@ -30,44 +32,70 @@ impl BitOp {
 
     /// Optimise the operation, given the known input bits and demanded output bits.
     pub fn optimise(self, KDBits { zeros, used }: KDBits) -> Self {
+        log::trace!("OPT:   Trying to optimise \"{self}\" (zeros={zeros:#x}, used = {used:#x})");
+
+        let elide = |reason: &str| {
+            log::trace!("OPT:     Elided, because {reason}");
+            Self::Nop
+        };
+        let elide_nop = || elide("this operation doesn't change its input");
+
+        let rewrite = |to: Self, reason: &str| {
+            log::trace!("OPT:     Rewritten to \"{to}\", because {reason}");
+            Self::Nop
+        };
+
+        let try_reduce_rot_to_shift = |ror: Bits6| {
+            let rol = ror.neg();
+            if used & !zeros & left_mask::<u64>(ror.into()) == 0 {
+                let reason = format!("the high {ror} bits are zero or unused");
+                return Some(rewrite(Self::ShiftRight(ror), &reason));
+            };
+            if used & !zeros & right_mask::<u64>(rol.into()) == 0 {
+                let reason = format!("the high {rol} bits are zero or unused");
+                return Some(rewrite(Self::ShiftLeft(rol), &reason));
+            };
+            None
+        };
+
         match self {
+            Self::Nop => self,
             // If the input bits are all zero, no op has any effect
-            _ if zeros == u64::MAX => Self::Nop,
+            _ if zeros == u64::MAX => elide("input is always zero"),
             // If none of the output bits are needed, the operation can be elided
-            _ if used == 0 => Self::Nop,
+            _ if used == 0 => elide("output isn't used"),
             // Operations with no effect can be reduced to nop
-            Self::ShiftLeft(Bits6::ZERO) => Self::Nop,
-            Self::ShiftRight(Bits6::ZERO) => Self::Nop,
-            Self::ArithRight(Bits6::ZERO) => Self::Nop,
-            Self::RotateRight(Bits6::ZERO) => Self::Nop,
-            Self::Copy(1) => Self::Nop,
+            Self::ShiftLeft(Bits6::ZERO) => elide_nop(),
+            Self::ShiftRight(Bits6::ZERO) => elide_nop(),
+            Self::ArithRight(Bits6::ZERO) => elide_nop(),
+            Self::RotateRight(Bits6::ZERO) => elide_nop(),
+            Self::Copy(1) => elide_nop(),
             // An arithmetic right shift where the input's high bit
             // is known to be zero is equivalent to a logical right shift
-            Self::ArithRight(amt) if zeros & high_bit() != 0 => Self::ShiftRight(amt),
+            Self::ArithRight(amt) if zeros & high_bit() != 0 => {
+                let reason = "the input's high bit is always zero";
+                rewrite(Self::ShiftRight(amt), reason)
+            }
             // Try to reduce a rotation to a left or right shift
-            Self::RotateRight(amt) if !zeros << amt.neg() == 0 => Self::ShiftRight(amt),
-            Self::RotateRight(amt) if !zeros >> amt == 0 => Self::ShiftLeft(amt.neg()),
-            Self::RotateRight(amt) if used >> amt.neg() == 0 => Self::ShiftRight(amt),
-            Self::RotateRight(amt) if used << amt == 0 => Self::ShiftLeft(amt.neg()),
+            Self::RotateRight(amt) if let Some(op) = try_reduce_rot_to_shift(amt) => op,
             // There is no need to clear bits that are already zero or unused,
             // and a mask that clears no bits can be elided entirely
-            Self::And(mask) => {
-                let mask = mask.with_used(used & !zeros);
-                match mask.zeros() {
-                    0 => Self::Nop,
-                    _ => Self::And(mask),
-                }
-            }
+            Self::And(mask) => match mask.with_used(used & !zeros) {
+                m if m.zeros() == 0 => elide("all input bits are zero or unused"),
+                m if m != mask => rewrite(Self::And(mask), "some input bits are zero or unused"),
+                _ => self,
+            },
             // Strength-reduce a degenerate copy to a shift left
-            Self::Copy(mask) if mask.is_power_of_two() => {
-                Self::ShiftLeft(Bits6::new(mask.trailing_zeros()))
+            Self::Copy(mask) if mask.count_ones() == 1 => {
+                let reason = format!("{mask:#x} has only one set bit");
+                rewrite(Self::ShiftLeft(mask.trailing_zeros().into()), &reason)
             }
             // The operation can't be optimised
             _ => self,
         }
     }
 
-    pub fn apply(self, value: u64) -> u64 {
+    pub fn exec(self, value: u64) -> u64 {
         match self {
             Self::Nop => value,
             Self::ShiftLeft(amt) => value << amt,

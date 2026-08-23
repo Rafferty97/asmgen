@@ -52,9 +52,9 @@ pub struct BitExtract {
     ops: SmallVec<[BitOp; 4]>,
     /// The destination bits that are written to;
     /// the other bits are guaranteed to always be zero
-    dst_bits: u64,
+    dst_bits: Cell<Option<u64>>,
     /// The total cost of the operations
-    cost: Cell<u16>,
+    cost: Cell<Option<u16>>,
     /// The origin of this bit extract
     #[cfg(debug_assertions)]
     origin: String,
@@ -62,7 +62,7 @@ pub struct BitExtract {
 
 /// Known and demanded bits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-struct KDBits {
+pub struct KDBits {
     /// Bits in the input known to be zero.
     pub zeros: u64,
     /// Bits in the output that are used.
@@ -122,7 +122,8 @@ impl BitExtract {
     /// Pushes an operation.
     pub fn push(&mut self, op: BitOp) {
         self.ops.push(op);
-        self.dst_bits = op.apply(self.dst_bits);
+        self.dst_bits.set(None);
+        self.cost.set(None);
     }
 
     pub fn optimised(mut self) -> Self {
@@ -139,11 +140,40 @@ impl BitExtract {
         //     println!("    {op}");
         // }
 
-        loop {
+        for i in 1..=5 {
+            log::trace!("OPT: Pass {i}: trying to optimise {} ops", self.ops.len());
+
+            // Remove nop instructions
+            let prev_size = self.ops.len();
             self.ops.retain(|op| *op != BitOp::Nop);
-            kd_bits.resize(self.ops.len(), Default::default());
+            match prev_size - self.ops.len() {
+                1 => log::trace!("OPT:   Removed 1 nop"),
+                n => log::trace!("OPT:   Removed {n} nops"),
+            }
+
+            let original = self.ops.clone();
+
+            // Fuse and optimise instructions
+            for i in 0..self.ops.len().saturating_sub(1) {
+                let [op1, op2] = self.ops.get_disjoint_mut([i, i + 1]).unwrap();
+                log::trace!("OPT:   Trying to fuse \"{op1}\", \"{op2}\"");
+                match BitOp::try_fuse(*op1, *op2) {
+                    RewriteResult::Preserve => {}
+                    RewriteResult::One(fused) => {
+                        log::trace!("OPT:     Fused into \"{fused}\"");
+                        *op1 = BitOp::Nop;
+                        *op2 = fused;
+                    }
+                    RewriteResult::Two(first, second) => {
+                        log::trace!("OPT:     Rewritten to \"{first}\", \"{second}\"");
+                        *op1 = first;
+                        *op2 = second;
+                    }
+                }
+            }
 
             // Forward pass
+            kd_bits.resize(self.ops.len(), Default::default());
             let mut zeros = 0;
             for (index, &op) in self.ops.iter().enumerate() {
                 kd_bits[index].zeros = zeros;
@@ -157,34 +187,13 @@ impl BitExtract {
                 used = op.calc_used_bits(used);
             }
 
-            // Fuse instructions
-            let mut changed = false;
-            for i in 0..self.ops.len().saturating_sub(1) {
-                let [op1, op2] = self.ops.get_disjoint_mut([i, i + 1]).unwrap();
-                match BitOp::try_fuse(*op1, *op2) {
-                    RewriteResult::Preserve => {}
-                    RewriteResult::One(fused) => {
-                        *op1 = BitOp::Nop;
-                        *op2 = fused;
-                        changed = true;
-                    }
-                    RewriteResult::Two(first, second) => {
-                        *op1 = first;
-                        *op2 = second;
-                        changed = true;
-                    }
-                }
-            }
-
             // Optimise instructions
             for (op, &kd_bits) in self.ops.iter_mut().zip(&kd_bits) {
-                let optimised = op.optimise(kd_bits);
-                changed |= optimised != *op;
-                *op = optimised;
+                *op = op.optimise(kd_bits);
             }
-            // fixme: fuse instructions
 
-            if !changed {
+            if self.ops == original {
+                log::trace!("OPT: Nothing changed in last pass; terminating");
                 break;
             }
         }
@@ -194,7 +203,7 @@ impl BitExtract {
         //     println!("    {op}");
         // }
 
-        self.cost.set(0);
+        self.cost.set(None);
     }
 
     /// Returns the operations comprising this `BitExtract`.
@@ -204,28 +213,38 @@ impl BitExtract {
 
     /// Returns the set of bits written by this `BitExtract`.
     pub fn dst_bits(&self) -> u64 {
-        self.dst_bits
+        if let Some(dst_bits) = self.dst_bits.get() {
+            return dst_bits;
+        }
+        let dst_bits = self.exec(u64::MAX);
+        self.dst_bits.set(Some(dst_bits));
+        dst_bits
     }
 
     /// Calculates the total cost of the `BitExtract`.
     pub fn cost(&self) -> u16 {
-        let mut cost = self.cost.get();
-        if cost == 0 {
-            // Count cost of each operation
-            let mut prev = None;
-            for op in &self.ops {
-                cost += op.cost(prev);
-                prev = Some(*op);
-            }
+        if let Some(cost) = self.cost.get() {
+            return cost;
+        }
 
-            // Count cost of folding into the accumulator
-            // fixme: this can be fused into the last op in some cases
-            cost += 1;
+        // Count cost of each operation
+        let mut cost = 0;
+        let mut prev = None;
+        for op in &self.ops {
+            cost += op.cost(prev);
+            prev = Some(*op);
+        }
 
-            self.cost.set(cost);
-        };
+        // Count cost of folding into the accumulator
+        // fixme: this can be fused into the last op in some cases
+        cost += 1;
 
+        self.cost.set(Some(cost));
         cost
+    }
+
+    pub fn exec(&self, input: u64) -> u64 {
+        self.ops.iter().fold(input, |acc, op| op.exec(acc))
     }
 }
 
@@ -233,8 +252,8 @@ impl Default for BitExtract {
     fn default() -> Self {
         Self {
             ops: SmallVec::new(),
-            dst_bits: u64::MAX,
-            cost: Cell::new(0),
+            dst_bits: Cell::new(None),
+            cost: Cell::new(None),
             #[cfg(debug_assertions)]
             origin: "<default>".into(),
         }
@@ -514,6 +533,13 @@ impl BitPermutation {
             dst |= (src & src_mask).rotate_left(rol as u32);
         }
         dst
+    }
+}
+
+impl Arbitrary<'_> for BitExtract {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let ops = u.arbitrary_iter()?.collect::<Result<_, _>>()?;
+        Ok(Self { ops, ..Default::default() })
     }
 }
 

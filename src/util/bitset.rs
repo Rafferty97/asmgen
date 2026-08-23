@@ -1,5 +1,7 @@
 use std::ops::{BitAnd, BitOr, Shl, Shr};
 
+use arbitrary::Arbitrary;
+
 use crate::util::{Bits6, mask::right_mask};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -154,6 +156,12 @@ impl Shr<Bits6> for PartialBits {
 
     fn shr(self, rhs: Bits6) -> Self {
         Self::new(self.bits >> rhs, !(!self.used >> rhs))
+    }
+}
+
+impl Arbitrary<'_> for PartialBits {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::full(u.arbitrary()?).with_used(u.arbitrary()?))
     }
 }
 

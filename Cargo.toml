@@ -12,7 +12,7 @@ name = "lower_bit_permutation"
 harness = false
 
 [dependencies]
-arbitrary = "1.4.2"
+arbitrary = { version = "1.4.2", features = ["derive"] }
 cranelift-codegen = { version = "0.134.3", features = ["riscv64", "x86"] }
 cranelift-frontend = "0.134.3"
 cranelift-jit = "0.134.3"
@@ -22,8 +22,10 @@ cranelift-module = "0.134.3"
 # cranelift-jit = { path = "../wasmtime/cranelift/jit" }
 # cranelift-module = { path = "../wasmtime/cranelift/module" }
 disarm64 = "0.2.0"
+env_logger = "0.11.11"
 fnv = "1.0.7"
 itertools = "0.15.0"
+log = "0.4.34"
 num-traits = "0.2.19"
 rand = "0.10.2"
 rand_xoshiro = "0.8.1"

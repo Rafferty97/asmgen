@@ -2,6 +2,8 @@ use asmgen::bit_permutation::{BitPermutation, BitPermutationPart};
 use asmgen::codegen::compile_bit_permutation;
 
 fn main() {
+    env_logger::init();
+
     let perm = BitPermutation::from_parts([
         BitPermutationPart::Repeat { len: 16, src_pos: 0 },
         BitPermutationPart::Repeat { len: 16, src_pos: 16 },
