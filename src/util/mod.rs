@@ -6,6 +6,7 @@ pub use print::PrintBits;
 pub use ratio::Ratio;
 
 pub mod aarch64;
+mod bit_rot;
 mod bitset;
 mod iter_set_bits;
 mod mask;

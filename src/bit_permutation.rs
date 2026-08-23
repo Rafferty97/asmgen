@@ -8,7 +8,6 @@ use fnv::FnvHashMap;
 use itertools::Itertools;
 use smallvec::SmallVec;
 
-use crate::util::Ratio;
 use crate::util::aarch64::is_aarch64_logical_immediate;
 use crate::util::{BitRun, Ratio};
 use crate::util::{PartialBits, PrimIntExt, PrintBits};
@@ -288,6 +287,7 @@ impl Debug for BitExtract {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 enum RewriteResult {
     Preserve,
     One(BitOp),
