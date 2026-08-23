@@ -83,7 +83,7 @@ impl BitOp {
             // and a mask that clears no bits can be elided entirely
             Self::And(mask) => match mask.with_used(used & !zeros) {
                 m if m.zeros() == 0 => elide("all input bits are zero or unused"),
-                m if m != mask => rewrite(Self::And(mask), "some input bits are zero or unused"),
+                m if m != mask => rewrite(Self::And(m), "some input bits are zero or unused"),
                 _ => self,
             },
             // Strength-reduce a degenerate copy to a shift left
@@ -104,7 +104,9 @@ impl BitOp {
             Self::ArithRight(amt) => ((value as i64) >> amt) as u64,
             Self::RotateRight(amt) => value.rotate_right(amt.into()),
             Self::And(mask) => value & mask.bits(),
-            Self::Copy(mask) => value.wrapping_mul(mask),
+            Self::Copy(mask) => iter_set_bits(mask)
+                .map(|k| value << k)
+                .fold(0, |a, b| a | b),
         }
     }
 
@@ -135,7 +137,7 @@ impl BitOp {
                 (output << amt) | needs_sign.then_some(high_bit()).unwrap_or(0)
             }
             Self::RotateRight(amt) => output.rotate_left(amt.into()),
-            Self::And(mask) => output & mask.bits(),
+            Self::And(mask) => output & !mask.zeros(),
             Self::Copy(mask) => iter_set_bits(mask)
                 .map(|shl| Self::ShiftLeft(shl.into()).calc_used_bits(output))
                 .fold(0, |acc, mask| acc | mask),
@@ -240,7 +242,7 @@ impl BitOp {
                 Self::try_fuse_mask_and_rot(m, shl.neg()).unwrap_or(preserve)
             }
             (Self::ShiftLeft(shl), Self::And(mask)) => {
-                let m = (mask >> shl) & (PartialBits::MAX >> shl);
+                let m = (mask >> shl) & (PartialBits::MAX << shl);
                 // log::trace!("xxx m:\t{}", PrintBits(mask));
                 // log::trace!("xxx mb:\t{}", PrintBits(mask.bits()));
                 // log::trace!("xxx mu:\t{}", PrintBits(mask.used()));
@@ -251,7 +253,7 @@ impl BitOp {
                 Self::try_fuse_mask_and_rot(m, shr).unwrap_or(preserve)
             }
             (Self::ShiftRight(shr), Self::And(mask)) => {
-                let m = (mask << shr) & (PartialBits::MAX << shr);
+                let m = (mask << shr) & (PartialBits::MAX >> shr);
                 Self::try_fuse_mask_and_rot(m, shr).unwrap_or(preserve)
             }
             _ => preserve,
@@ -277,13 +279,14 @@ impl BitOp {
                 BitOp::set_to_zero(),
                 "all bits are either shifted out, masked or unused",
             ),
-            BitRun::Left { min, max } if (min..=max).contains(&ror.into()) => fuse(
+            BitRun::Left { min, max } if (min..=max).contains(&ror.neg().into()) => fuse(
                 BitOp::ShiftLeft(ror.neg()),
-                "none of the bits not shifted out need to be masked",
+                &format!("the mask is {ror} ones followed by {} zeros", ror.neg()),
             ),
-            BitRun::Right { min, max } if (min..=max).contains(&ror.neg().into()) => fuse(
+            // can only fuse mask M and ror 7 with shr 7 <-- M == (111000) with 7 trailing zers, i.e. Left 57
+            BitRun::Right { min, max } if (min..=max).contains(&ror.into()) => fuse(
                 BitOp::ShiftRight(ror),
-                "none of the bits not shifted out need to be masked",
+                &format!("the mask is {} ones followed by {ror} zeros", ror.neg()),
             ),
             // BitRun::Right { min, max } => match max >= 64 - u8::from(shr) {
             //     true => fuse(Self::ShiftRight(shr), ""),
@@ -313,13 +316,10 @@ impl Display for BitOp {
             Self::ShiftLeft(amt) => write!(f, "shl {amt}"),
             Self::ShiftRight(amt) => write!(f, "shr {amt}"),
             Self::ArithRight(amt) => write!(f, "sar {amt}"),
-            Self::RotateRight(amt) => match amt.neg() < amt {
-                true => write!(f, "rol {}", amt.neg()),
-                false => write!(f, "ror {amt}"),
-            },
-            Self::And(mask) => write!(f, "and {}", PrintBits(mask)),
+            Self::RotateRight(amt) => write!(f, "ror {amt}"),
+            Self::And(mask) => write!(f, "and {:#x} {:#x}", mask.bits(), mask.used()), // PrintBits(mask)),
             Self::Copy(0) => write!(f, "dup <none>"),
-            Self::Copy(mask) => write!(f, "dup {}", iter_set_bits(mask).join(", ")),
+            Self::Copy(mask) => write!(f, "dup {:#x}", mask), // iter_set_bits(mask).join(", ")),
         }
     }
 }
@@ -332,4 +332,41 @@ impl Debug for BitOp {
 
 const fn high_bit() -> u64 {
     1u64.rotate_right(1)
+}
+
+#[cfg(test)]
+mod test {
+    use crate::bit_permutation::BitExtract;
+
+    #[test]
+    fn fuzz_case_1() {
+        env_logger::try_init().ok();
+
+        let extract = BitExtract::new()
+            .and(0x1919191909090909 & 0xc9c9c9c9c9c9c9c9)
+            .copy(0xc9c9c9c9c9c9c9c9)
+            .and(0x10101000048c1c9);
+        let input = 0xf8aaa2f732;
+
+        let result = extract.exec(input);
+        let result2 = extract.optimised().exec(input);
+
+        assert_eq!(result, result2);
+    }
+
+    #[test]
+    fn fuzz_case_2() {
+        env_logger::try_init().ok();
+
+        let extract = BitExtract::new()
+            .sar(9.into())
+            .and(0xfe00000000000000)
+            .shr(7.into());
+        let input = 439177129557;
+
+        let result = extract.exec(input);
+        let result2 = extract.optimised().exec(input);
+
+        assert_eq!(result, result2);
+    }
 }
