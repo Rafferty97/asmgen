@@ -220,43 +220,43 @@ impl BitOp {
     pub fn cost(&self, prev: Option<BitOp>) -> u16 {
         let isa = ISA;
 
-        // fixme: account for instruction fusion
-        // - shift and mask -> `ubfx` or `pext`
-        // - others?
-        // or: just model the fused ops directly?
+        const INS_COST: u16 = 16;
+        const IMM_COST: u16 = 1;
+
         match self {
             Self::Nop => 0,
-            Self::ShiftLeft(_) => 1,
-            Self::ShiftRight(_) => 1,
-            Self::ArithRight(_) => 1,
-            Self::RotateRight(_) => 1,
+            Self::ShiftLeft(_) => INS_COST,
+            Self::ShiftRight(_) | Self::ArithRight(_) => match prev {
+                Some(Self::ShiftLeft(_)) => 0,
+                _ => INS_COST,
+            },
+            Self::RotateRight(_) => INS_COST,
             Self::And(mask) => match isa {
-                Isa::AArch64 => 1 + cost_aarch64_logical_imm(*mask),
-                _ => 2,
+                Isa::AArch64 => INS_COST + cost_aarch64_logical_imm(*mask) * IMM_COST,
+                _ => 2 * INS_COST,
             },
             Self::Copy(mask) => match (mask.count_ones(), mask.leading_zeros()) {
-                (0, _) => 1,
+                (0, _) => INS_COST,
                 (1, 0) => 0,
-                (1, _) => 1,
+                (1, _) => INS_COST,
                 (2, 0) => match isa {
-                    Isa::AArch64 => 1,
-                    _ => 2,
+                    Isa::AArch64 => INS_COST,
+                    _ => 2 * INS_COST,
                 },
                 (2, _) => match isa {
-                    Isa::AArch64 => 2,
-                    _ => 3,
+                    Isa::AArch64 => 2 * INS_COST,
+                    _ => 3 * INS_COST,
                 },
                 _ => match isa {
-                    Isa::AArch64 => 3 + cost_aarch64_mat_imm(PartialBits::full(*mask)),
-                    _ => 4,
+                    Isa::AArch64 => {
+                        let ins = 3 * INS_COST;
+                        let imm = cost_aarch64_mat_imm(PartialBits::full(*mask)) * IMM_COST;
+                        ins + imm
+                    }
+                    _ => 4 * INS_COST,
                 },
             },
         }
-
-        // fixme: determine whether mask can be elided by changing rotations to shifts
-        // fixme: fix cost modelling for immediate instantiation
-
-        // self.cost = [c_sh1, c_sar, c_sh2_and, c_mul, c_or].iter().sum();
     }
 
     pub fn validate(self) {
