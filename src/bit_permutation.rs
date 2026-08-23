@@ -141,7 +141,7 @@ impl BitExtract {
         // }
 
         for i in 1..=5 {
-            log::trace!("OPT: Pass {i}: trying to optimise {} ops", self.ops.len());
+            log::trace!("OPT: Pass {i}: {}", self);
 
             // Remove nop instructions
             let prev_size = self.ops.len();

@@ -45,7 +45,7 @@ impl<const N: u32> Bits<N> {
     }
 
     pub fn saturating_add(self, rhs: Self) -> Self {
-        Self::new(self.0.saturating_add(rhs.0))
+        Self::new(self.0.saturating_add(rhs.0).min(Self::MAX.0))
     }
 
     pub fn saturating_sub(self, rhs: Self) -> Self {

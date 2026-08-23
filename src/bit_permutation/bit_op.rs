@@ -40,9 +40,9 @@ impl BitOp {
         };
         let elide_nop = || elide("this operation doesn't change its input");
 
-        let rewrite = |to: Self, reason: &str| {
-            log::trace!("OPT:     Rewritten to \"{to}\", because {reason}");
-            Self::Nop
+        let rewrite = |new_op: Self, reason: &str| {
+            log::trace!("OPT:     Rewritten to \"{new_op}\", because {reason}");
+            new_op
         };
 
         let try_reduce_rot_to_shift = |ror: Bits6| {
@@ -52,7 +52,7 @@ impl BitOp {
                 return Some(rewrite(Self::ShiftRight(ror), &reason));
             };
             if used & !zeros & right_mask::<u64>(rol.into()) == 0 {
-                let reason = format!("the high {rol} bits are zero or unused");
+                let reason = format!("the low {rol} bits are zero or unused");
                 return Some(rewrite(Self::ShiftLeft(rol), &reason));
             };
             None
