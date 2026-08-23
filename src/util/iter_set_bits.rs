@@ -20,7 +20,7 @@ mod test {
     #[test]
     fn test_iter_set_bits() {
         let iter = iter_set_bits(0);
-        assert_eq!(iter.collect_vec(), &[]);
+        assert!(iter.collect_vec().is_empty());
 
         let iter = iter_set_bits(0b10010100110);
         assert_eq!(iter.collect_vec(), &[1, 2, 5, 7, 10]);
