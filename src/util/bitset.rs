@@ -74,12 +74,12 @@ impl PartialBits {
         self.used
     }
 
-    pub fn ones(self) -> u64 {
-        self.bits & self.used
-    }
-
     pub fn zeros(self) -> u64 {
         !self.bits
+    }
+
+    pub fn ones(self) -> u64 {
+        self.bits & self.used
     }
 
     pub fn unused(self) -> u64 {
@@ -92,6 +92,22 @@ impl PartialBits {
 
     pub fn max_bits(self) -> u64 {
         self.bits
+    }
+
+    pub fn as_bit_run(self) -> BitRun {
+        let min = 64 - self.ones().trailing_zeros() as u8;
+        let max = self.zeros().leading_zeros() as u8;
+        if min <= max {
+            return BitRun::Left { min, max };
+        }
+
+        let min = 64 - self.ones().leading_zeros() as u8;
+        let max = self.zeros().trailing_zeros() as u8;
+        if min <= max {
+            return BitRun::Right { min, max };
+        }
+
+        BitRun::None
     }
 
     pub fn contains(self, value: u64) -> bool {
@@ -138,6 +154,23 @@ impl Shr<u8> for PartialBits {
 
     fn shr(self, rhs: u8) -> Self {
         Self::new(self.bits >> rhs, !(!self.used >> rhs))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BitRun {
+    None,
+    Left { min: u8, max: u8 },
+    Right { min: u8, max: u8 },
+}
+
+impl BitRun {
+    pub fn invert(self) -> Self {
+        match self {
+            Self::None => Self::None,
+            Self::Left { min, max } => Self::Right { min: 64 - max, max: 64 - min },
+            Self::Right { min, max } => Self::Left { min: 64 - max, max: 64 - min },
+        }
     }
 }
 

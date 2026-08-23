@@ -10,6 +10,7 @@ use smallvec::SmallVec;
 
 use crate::util::Ratio;
 use crate::util::aarch64::is_aarch64_logical_immediate;
+use crate::util::{BitRun, Ratio};
 use crate::util::{PartialBits, PrimIntExt, PrintBits};
 use crate::util::{iter_set_bits, left_mask, middle_mask, right_mask};
 
@@ -176,10 +177,18 @@ impl BitExtract {
             let mut changed = false;
             for i in 0..self.ops.len().saturating_sub(1) {
                 let [op1, op2] = self.ops.get_disjoint_mut([i, i + 1]).unwrap();
-                if let Some(fused) = BitOp::try_fuse(*op1, *op2) {
-                    *op1 = BitOp::Nop;
-                    *op2 = fused;
-                    changed = true;
+                match BitOp::try_fuse(*op1, *op2) {
+                    RewriteResult::Preserve => {}
+                    RewriteResult::One(fused) => {
+                        *op1 = BitOp::Nop;
+                        *op2 = fused;
+                        changed = true;
+                    }
+                    RewriteResult::Two(first, second) => {
+                        *op1 = first;
+                        *op2 = second;
+                        changed = true;
+                    }
                 }
             }
 
@@ -279,6 +288,12 @@ impl Debug for BitExtract {
     }
 }
 
+enum RewriteResult {
+    Preserve,
+    One(BitOp),
+    Two(BitOp, BitOp),
+}
+
 impl BitOp {
     /// Returns the canonical operation that sets all bits to zero.
     fn set_to_zero() -> Self {
@@ -286,54 +301,96 @@ impl BitOp {
     }
 
     /// Fuses two instructions, if possible.
-    fn try_fuse(first: Self, second: Self) -> Option<Self> {
+    fn try_fuse(first: Self, second: Self) -> RewriteResult {
+        use RewriteResult::*;
+
         match (first, second) {
             // Two sucessive shifts in the same direction can be fused.
-            (Self::ShiftLeft(a), Self::ShiftLeft(b)) => Some(match a + b {
+            (Self::ShiftLeft(a), Self::ShiftLeft(b)) => One(match a + b {
                 sum @ 0..64 => Self::ShiftLeft(sum),
                 _ => Self::set_to_zero(),
             }),
-            (Self::ShiftRight(a), Self::ShiftRight(b)) => Some(match a + b {
+            (Self::ShiftRight(a), Self::ShiftRight(b)) => One(match a + b {
                 sum @ 0..64 => Self::ShiftRight(sum),
                 _ => Self::set_to_zero(),
             }),
             (Self::ArithRight(a), Self::ArithRight(b)) => {
                 let sum = (a + b).min(63);
-                Some(Self::ArithRight(sum))
+                One(Self::ArithRight(sum))
             }
             // Two opposed shifts are equivalent to a mask.
             // Note that a left shift followed by an arithmetic right shift
             // cannot be simplified even though the reverse can be.
             (Self::ShiftLeft(a), Self::ShiftRight(b)) if a == b => {
-                Some(Self::And(PartialBits::full(u64::MAX >> a)))
+                One(Self::And(PartialBits::full(u64::MAX >> a)))
             }
             (Self::ShiftRight(a) | Self::ArithRight(a), Self::ShiftLeft(b)) if a == b => {
-                Some(Self::And(PartialBits::full(u64::MAX << a)))
+                One(Self::And(PartialBits::full(u64::MAX << a)))
             }
             (Self::RotateRight(a), Self::RotateRight(b)) => {
                 let sum = (a + b) % 64;
-                Some(Self::RotateRight(sum))
+                One(Self::RotateRight(sum))
             }
             // Two successive masks can be fused.
-            (Self::And(a), Self::And(b)) => Some(Self::And(a & b)),
+            (Self::And(a), Self::And(b)) => One(Self::And(a & b)),
             // A shift/mask pair that can be rewritten as two shifts can sometimes
             // be lowered to better machine code, and will never be worse.
-            (Self::And(m), Self::ShiftLeft(k)) => Self::try_fuse_shift_and_mask(64 - k, m << k),
-            (Self::ShiftLeft(k), Self::And(m)) => {
-                let mask = m & PartialBits::MAX << k;
-                Self::try_fuse_shift_and_mask(64 - k, mask)
+            (Self::And(mask), Self::ShiftLeft(shl)) => {
+                Self::try_fuse_shl_and_mask(shl, mask << shl)
             }
-            (Self::And(m), Self::ShiftRight(k)) => Self::try_fuse_shift_and_mask(k, m >> k),
-            (Self::ShiftRight(k), Self::And(m)) => {
-                let mask = m & PartialBits::MAX << k;
-                Self::try_fuse_shift_and_mask(k, mask)
+            (Self::ShiftLeft(shl), Self::And(mask)) => {
+                Self::try_fuse_shl_and_mask(shl, mask & (PartialBits::MAX << shl))
             }
-            _ => None,
+            (Self::And(mask), Self::ShiftRight(shr)) => {
+                Self::try_fuse_shr_and_mask(shr, mask >> shr)
+            }
+            (Self::ShiftRight(shr), Self::And(mask)) => {
+                Self::try_fuse_shr_and_mask(shr, mask & (PartialBits::MAX >> shr))
+            }
+            _ => Preserve,
         }
     }
 
-    fn try_fuse_shift_and_mask(ror: u8, mask: PartialBits) -> Option<Self> {
-        None // todo
+    fn try_fuse_shl_and_mask(shl: u8, mask: PartialBits) -> RewriteResult {
+        use RewriteResult::*;
+
+        if shl == 0 {
+            return One(BitOp::And(mask));
+        }
+
+        match mask.as_bit_run() {
+            BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => One(BitOp::set_to_zero()),
+            BitRun::Left { min, max } => match max >= 64 - shl {
+                true => One(Self::ShiftLeft(shl)),
+                false => Two(Self::ShiftRight(64 + min - shl), Self::ShiftLeft(64 - min)),
+            },
+            BitRun::Right { min, max } => match max == 64 {
+                true => One(Self::ShiftLeft(shl)),
+                false => Two(Self::ShiftLeft(64 + shl - min), Self::ShiftRight(64 - min)),
+            },
+            BitRun::None => Preserve,
+        }
+    }
+
+    fn try_fuse_shr_and_mask(shr: u8, mask: PartialBits) -> RewriteResult {
+        use RewriteResult::*;
+
+        if shr == 0 {
+            return One(BitOp::And(mask));
+        }
+
+        match mask.as_bit_run() {
+            BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => One(BitOp::set_to_zero()),
+            BitRun::Right { min, max } => match max >= 64 - shr {
+                true => One(Self::ShiftRight(shr)),
+                false => Two(Self::ShiftLeft(64 + min - shr), Self::ShiftRight(64 - min)),
+            },
+            BitRun::Left { min, max } => match max == 64 {
+                true => One(Self::ShiftRight(shr)),
+                false => Two(Self::ShiftRight(64 + shr - min), Self::ShiftLeft(64 - min)),
+            },
+            BitRun::None => Preserve,
+        }
     }
 
     /// Optimise the operation, given the known input bits and demanded output bits.
