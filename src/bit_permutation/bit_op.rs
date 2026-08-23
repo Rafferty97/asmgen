@@ -46,13 +46,14 @@ impl BitOp {
         };
 
         let try_reduce_rot_to_shift = |ror: Bits6| {
+            let zeros = used & !zeros.rotate_right(ror.into());
             let rol = ror.neg();
-            if used & !zeros & left_mask::<u64>(ror.into()) == 0 {
-                let reason = format!("the high {ror} bits are zero or unused");
+            if zeros & left_mask::<u64>(ror.into()) == 0 {
+                let reason = format!("the high {ror} output bits are zero or unused");
                 return Some(rewrite(Self::ShiftRight(ror), &reason));
             };
-            if used & !zeros & right_mask::<u64>(rol.into()) == 0 {
-                let reason = format!("the low {rol} bits are zero or unused");
+            if zeros & right_mask::<u64>(rol.into()) == 0 {
+                let reason = format!("the low {rol} output bits are zero or unused");
                 return Some(rewrite(Self::ShiftLeft(rol), &reason));
             };
             None

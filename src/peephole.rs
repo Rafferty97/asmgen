@@ -1,19 +1,42 @@
-pub fn run_peephole<const N: usize, T, F>(ops: &[T], f: F, nop: T) -> Vec<T>
+pub fn run_peephole<const N: usize, T, F>(ops: &mut Vec<T>, f: F, nop: T)
 where
     T: Copy + Eq,
     F: Fn([T; N]) -> [T; N],
 {
-    let mut output = vec![];
-    let mut window = std::array::from_fn(|i| ops.get(i).copied().unwrap_or(nop));
-    for i in 0..ops.len() {
-        window = f(window);
+    let mut window = [nop; N];
+    let mut next_input = 0;
+    let mut next_output = 0;
+
+    // Fill the window
+    for op in window.iter_mut().take(ops.len()) {
+        *op = ops[next_input];
+        next_input += 1;
+    }
+
+    // Main loop
+    while next_input < ops.len() {
+        window = f(window).into();
         if window[0] != nop {
-            output.push(window[0]);
+            ops[next_output] = window[0];
+            next_output += 1;
         }
         window.rotate_left(1);
-        window[N - 1] = ops.get(i + N).copied().unwrap_or(nop);
+        window[N - 1] = ops[next_input];
+        next_input += 1;
     }
-    output
+
+    // Flush the window
+    for _ in 0..N {
+        window = f(window).into();
+        if window[0] != nop {
+            ops[next_output] = window[0];
+            next_output += 1;
+        }
+        window.rotate_left(1);
+        window[N - 1] = nop;
+    }
+
+    ops.truncate(next_output);
 }
 
 #[cfg(test)]
@@ -24,11 +47,24 @@ mod test {
     fn basic_test() {
         // Merge runs of the same integer, and treat `0` as the nop
         let input = vec![1, 2, 2, 3, 3, 3, 2, 0, 2, 2, 0, 0, 1, 1, 1];
+        let merge = |[a, b]: [i32; 2]| if a == b { [0, a] } else { [a, b] };
 
-        let result = run_peephole(&input, |[a, b]| if a == b { [0, a] } else { [a, b] }, 0);
+        let mut result = input.clone();
+        run_peephole(&mut result, merge, 0);
         assert_eq!(&result, &[1, 2, 3, 2, 2, 1]);
 
-        let result = run_peephole(&result, |[a, b]| if a == b { [0, a] } else { [a, b] }, 0);
+        run_peephole(&mut result, merge, 0);
         assert_eq!(&result, &[1, 2, 3, 2, 1]);
+    }
+
+    #[test]
+    fn short_input() {
+        // Merge runs of the same integer, and treat `0` as the nop
+        let input = vec![1];
+        let merge = |[a, b, c]: [i32; 3]| if a == b { [0, a, c] } else { [a, b, c] };
+
+        let mut result = input.clone();
+        run_peephole(&mut result, merge, 0);
+        assert_eq!(&result, &[1]);
     }
 }

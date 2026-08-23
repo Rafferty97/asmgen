@@ -10,6 +10,7 @@ use smallvec::SmallVec;
 
 pub use self::bit_op::BitOp;
 use crate::bit_permutation::bit_op::RewriteResult;
+use crate::peephole::run_peephole;
 use crate::util::aarch64::is_aarch64_logical_immediate;
 use crate::util::{BitRun, Bits6, Ratio};
 use crate::util::{PartialBits, PrimIntExt, PrintBits};
@@ -49,7 +50,7 @@ impl BitPermutationPart {
 #[derive(Clone)]
 pub struct BitExtract {
     /// The sequence of operations
-    ops: SmallVec<[BitOp; 4]>,
+    ops: Vec<BitOp>,
     /// The destination bits that are written to;
     /// the other bits are guaranteed to always be zero
     dst_bits: Cell<Option<u64>>,
@@ -143,34 +144,24 @@ impl BitExtract {
         for i in 1..=5 {
             log::trace!("OPT: Pass {i}: {}", self);
 
-            // Remove nop instructions
-            let prev_size = self.ops.len();
-            self.ops.retain(|op| *op != BitOp::Nop);
-            match prev_size - self.ops.len() {
-                1 => log::trace!("OPT:   Removed 1 nop"),
-                n => log::trace!("OPT:   Removed {n} nops"),
-            }
-
             let original = self.ops.clone();
 
             // Fuse and optimise instructions
-            for i in 0..self.ops.len().saturating_sub(1) {
-                let [op1, op2] = self.ops.get_disjoint_mut([i, i + 1]).unwrap();
-                log::trace!("OPT:   Trying to fuse \"{op1}\", \"{op2}\"");
-                match BitOp::try_fuse(*op1, *op2) {
-                    RewriteResult::Preserve => {}
+            run_peephole(
+                &mut self.ops,
+                |[op1, op2]| match BitOp::try_fuse(op1, op2) {
+                    RewriteResult::Preserve => [op1, op2],
                     RewriteResult::One(fused) => {
                         log::trace!("OPT:     Fused into \"{fused}\"");
-                        *op1 = BitOp::Nop;
-                        *op2 = fused;
+                        [BitOp::Nop, fused]
                     }
                     RewriteResult::Two(first, second) => {
                         log::trace!("OPT:     Rewritten to \"{first}\", \"{second}\"");
-                        *op1 = first;
-                        *op2 = second;
+                        [first, second]
                     }
-                }
-            }
+                },
+                BitOp::Nop,
+            );
 
             // Forward pass
             kd_bits.resize(self.ops.len(), Default::default());
@@ -251,7 +242,7 @@ impl BitExtract {
 impl Default for BitExtract {
     fn default() -> Self {
         Self {
-            ops: SmallVec::new(),
+            ops: vec![],
             dst_bits: Cell::new(None),
             cost: Cell::new(None),
             #[cfg(debug_assertions)]
