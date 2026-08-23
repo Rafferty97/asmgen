@@ -1,6 +1,6 @@
 use std::ops::{BitAnd, BitOr, Shl, Shr};
 
-use crate::util::mask::right_mask;
+use crate::util::{Bits6, mask::right_mask};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BitSet {
@@ -13,8 +13,8 @@ pub struct BitSet {
 
 impl BitSet {
     pub fn new(bits: u64, len: usize) -> Self {
-        let len = len.min(64) as u8;
         let bits = bits & right_mask::<u64>(len);
+        let len = len as u8;
         Self { bits, len }
     }
 
@@ -95,13 +95,13 @@ impl PartialBits {
     }
 
     pub fn as_bit_run(self) -> BitRun {
-        let min = 64 - self.ones().trailing_zeros() as u8;
+        let min = (64 - self.ones().trailing_zeros()) as u8;
         let max = self.zeros().leading_zeros() as u8;
         if min <= max {
             return BitRun::Left { min, max };
         }
 
-        let min = 64 - self.ones().leading_zeros() as u8;
+        let min = (64 - self.ones().leading_zeros()) as u8;
         let max = self.zeros().trailing_zeros() as u8;
         if min <= max {
             return BitRun::Right { min, max };
@@ -141,18 +141,18 @@ impl BitAnd for PartialBits {
     }
 }
 
-impl Shl<u8> for PartialBits {
+impl Shl<Bits6> for PartialBits {
     type Output = Self;
 
-    fn shl(self, rhs: u8) -> Self {
+    fn shl(self, rhs: Bits6) -> Self {
         Self::new(self.bits << rhs, !(!self.used << rhs))
     }
 }
 
-impl Shr<u8> for PartialBits {
+impl Shr<Bits6> for PartialBits {
     type Output = Self;
 
-    fn shr(self, rhs: u8) -> Self {
+    fn shr(self, rhs: Bits6) -> Self {
         Self::new(self.bits >> rhs, !(!self.used >> rhs))
     }
 }

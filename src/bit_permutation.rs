@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 pub use self::bit_op::BitOp;
 use crate::bit_permutation::bit_op::RewriteResult;
 use crate::util::aarch64::is_aarch64_logical_immediate;
-use crate::util::{BitRun, Ratio};
+use crate::util::{BitRun, Bits6, Ratio};
 use crate::util::{PartialBits, PrimIntExt, PrintBits};
 use crate::util::{iter_set_bits, left_mask, middle_mask, right_mask};
 
@@ -84,28 +84,28 @@ impl BitExtract {
         self
     }
 
-    pub fn shl(mut self, amt: u8) -> Self {
+    pub fn shl(mut self, amt: Bits6) -> Self {
         self.push(BitOp::ShiftLeft(amt));
         self
     }
 
-    pub fn shr(mut self, amt: u8) -> Self {
+    pub fn shr(mut self, amt: Bits6) -> Self {
         self.push(BitOp::ShiftRight(amt));
         self
     }
 
-    pub fn sar(mut self, amt: u8) -> Self {
+    pub fn sar(mut self, amt: Bits6) -> Self {
         self.push(BitOp::ArithRight(amt));
         self
     }
 
-    pub fn rol(mut self, amt: u8) -> Self {
-        self.push(BitOp::RotateRight(0u8.wrapping_sub(amt) % 64));
+    pub fn rol(mut self, amt: Bits6) -> Self {
+        self.push(BitOp::RotateRight(amt.neg()));
         self
     }
 
-    pub fn ror(mut self, amt: u8) -> Self {
-        self.push(BitOp::RotateRight(amt % 64));
+    pub fn ror(mut self, amt: Bits6) -> Self {
+        self.push(BitOp::RotateRight(amt));
         self
     }
 
@@ -330,7 +330,7 @@ impl BitPermutation {
                 self.len += len;
             }
             BitPermutationPart::Slice { len, src_pos } => {
-                let src_mask = middle_mask::<u64>(src_pos, len);
+                let src_mask = middle_mask::<u64>(src_pos as usize, len as usize);
                 let rol = self.len + 64 - src_pos;
                 *self.rot_masks.entry(rol % 64).or_insert(0) |= src_mask;
                 self.len += len;
@@ -427,7 +427,8 @@ impl BitPermutation {
                 let ex_sar = (63 - sar_lz) as u8;
 
                 // Verify that this combination is feasible
-                let bc_mask = right_mask::<u64>(ex_sar).rotate_left((src_pos + 1 + rol) as u32);
+                let bc_mask =
+                    right_mask::<u64>(ex_sar as usize).rotate_left((src_pos + 1 + rol) as u32);
                 let clobber_mask = bc_mask & !bc_dst_mask;
                 if clobber_mask & sh_dst_mask != 0 {
                     return None;
@@ -437,19 +438,28 @@ impl BitPermutation {
                 let ex_rol = ((rol as i32) + (src_pos as i32 + 1) + (63 - sar_lz as i32)) as u8;
 
                 let extract = BitExtract::new().with_origin(|| format!("shl {rol} + bc {src_pos}"));
-                Some(extract.ror(ex_ror).sar(ex_sar).rol(ex_rol).and(dst_mask))
+                Some(
+                    extract
+                        .ror(ex_ror.into())
+                        .sar(ex_sar.into())
+                        .rol(ex_rol.into())
+                        .and(dst_mask),
+                )
             })
             .collect_vec();
         let shifts = shifts.into_iter().map(|ShiftExtract { rol, dst_mask }| {
             let extract = BitExtract::new().with_origin(|| format!("shl {rol}"));
-            extract.rol(rol).and(dst_mask)
+            extract.rol(rol.into()).and(dst_mask)
         });
         let broadcasts = broadcasts
             .into_iter()
             .map(|BroadcastExtract { src_pos, dst_mask }| {
                 let extract = BitExtract::new().with_origin(|| format!("bc {src_pos}"));
                 let sar = (63 - dst_mask.trailing_zeros()) as u8;
-                extract.shl(63 - src_pos).sar(sar).and(dst_mask)
+                extract
+                    .shl((63 - src_pos).into())
+                    .sar(sar.into())
+                    .and(dst_mask)
             });
         let repeats = repeats
             .into_iter()
@@ -466,7 +476,7 @@ impl BitPermutation {
                             shr
                         )
                     })
-                    .shr(shr)
+                    .shr(shr.into())
                     .and(src_mask >> shr)
                     .copy(rol_mask.rotate_left(shr as u32))
             });
@@ -619,10 +629,14 @@ mod test {
 
     #[test]
     fn fuse_rotates() {
-        let extract = BitExtract::new().ror(12).rol(6).rol(9).ror(5);
+        let extract = BitExtract::new()
+            .ror(12.into())
+            .rol(6.into())
+            .rol(9.into())
+            .ror(5.into());
         assert_eq!(extract.ops().len(), 4);
         let extract = extract.optimised();
-        assert_eq!(extract.ops(), &[BitOp::RotateRight(2)]);
+        assert_eq!(extract.ops(), &[BitOp::RotateRight(2.into())]);
     }
 
     #[test]

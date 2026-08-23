@@ -1,20 +1,20 @@
 use std::fmt::Debug;
 
 use super::*;
-use crate::util::{BitRun, PartialBits, iter_set_bits, left_mask, right_mask};
+use crate::util::{BitRun, Bits6, PartialBits, iter_set_bits, left_mask, right_mask};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BitOp {
     /// No operation.
     Nop,
     /// Left shift.
-    ShiftLeft(u8),
+    ShiftLeft(Bits6),
     /// Logical right shift.
-    ShiftRight(u8),
+    ShiftRight(Bits6),
     /// Arithmetic right shift.
-    ArithRight(u8),
+    ArithRight(Bits6),
     /// Right rotation.
-    RotateRight(u8),
+    RotateRight(Bits6),
     /// Bitwise AND.
     /// It is an invariant that `!mask & !used == 0`.
     And(PartialBits),
@@ -30,25 +30,25 @@ impl BitOp {
 
     /// Optimise the operation, given the known input bits and demanded output bits.
     pub fn optimise(self, KDBits { zeros, used }: KDBits) -> Self {
-        let result = match self {
+        match self {
             // If the input bits are all zero, no op has any effect
             _ if zeros == u64::MAX => Self::Nop,
             // If none of the output bits are needed, the operation can be elided
             _ if used == 0 => Self::Nop,
             // Operations with no effect can be reduced to nop
-            Self::ShiftLeft(0) => Self::Nop,
-            Self::ShiftRight(0) => Self::Nop,
-            Self::ArithRight(0) => Self::Nop,
-            Self::RotateRight(0) => Self::Nop,
+            Self::ShiftLeft(Bits6::ZERO) => Self::Nop,
+            Self::ShiftRight(Bits6::ZERO) => Self::Nop,
+            Self::ArithRight(Bits6::ZERO) => Self::Nop,
+            Self::RotateRight(Bits6::ZERO) => Self::Nop,
             Self::Copy(1) => Self::Nop,
             // An arithmetic right shift where the input's high bit
             // is known to be zero is equivalent to a logical right shift
             Self::ArithRight(amt) if zeros & high_bit() != 0 => Self::ShiftRight(amt),
             // Try to reduce a rotation to a left or right shift
-            Self::RotateRight(amt) if !zeros << (64 - amt) == 0 => Self::ShiftRight(amt),
-            Self::RotateRight(amt) if !zeros >> amt == 0 => Self::ShiftLeft(64 - amt),
-            Self::RotateRight(amt) if used >> (64 - amt) == 0 => Self::ShiftRight(amt),
-            Self::RotateRight(amt) if used << amt == 0 => Self::ShiftLeft(64 - amt),
+            Self::RotateRight(amt) if !zeros << amt.neg() == 0 => Self::ShiftRight(amt),
+            Self::RotateRight(amt) if !zeros >> amt == 0 => Self::ShiftLeft(amt.neg()),
+            Self::RotateRight(amt) if used >> amt.neg() == 0 => Self::ShiftRight(amt),
+            Self::RotateRight(amt) if used << amt == 0 => Self::ShiftLeft(amt.neg()),
             // There is no need to clear bits that are already zero or unused,
             // and a mask that clears no bits can be elided entirely
             Self::And(mask) => {
@@ -60,13 +60,11 @@ impl BitOp {
             }
             // Strength-reduce a degenerate copy to a shift left
             Self::Copy(mask) if mask.is_power_of_two() => {
-                Self::ShiftLeft(mask.trailing_zeros() as u8)
+                Self::ShiftLeft(Bits6::new(mask.trailing_zeros()))
             }
             // The operation can't be optimised
             _ => self,
-        };
-        result.validate();
-        result
+        }
     }
 
     pub fn apply(self, value: u64) -> u64 {
@@ -75,7 +73,7 @@ impl BitOp {
             Self::ShiftLeft(amt) => value << amt,
             Self::ShiftRight(amt) => value >> amt,
             Self::ArithRight(amt) => ((value as i64) >> amt) as u64,
-            Self::RotateRight(amt) => value.rotate_right(amt as u32),
+            Self::RotateRight(amt) => value.rotate_right(amt.into()),
             Self::And(mask) => value & mask.bits(),
             Self::Copy(mask) => value.wrapping_mul(mask),
         }
@@ -85,13 +83,13 @@ impl BitOp {
     pub fn calc_known_zeros(self, input: u64) -> u64 {
         match self {
             Self::Nop => input,
-            Self::ShiftLeft(amt) => input << amt | right_mask::<u64>(amt),
-            Self::ShiftRight(amt) => input >> amt | left_mask::<u64>(amt),
+            Self::ShiftLeft(amt) => input << amt | right_mask::<u64>(amt.into()),
+            Self::ShiftRight(amt) => input >> amt | left_mask::<u64>(amt.into()),
             Self::ArithRight(amt) => ((input as i64) >> amt) as u64,
-            Self::RotateRight(amt) => input.rotate_right(amt as u32),
+            Self::RotateRight(amt) => input.rotate_right(amt.into()),
             Self::And(mask) => input | mask.zeros(),
             Self::Copy(mask) => iter_set_bits(mask)
-                .map(|shl| Self::ShiftLeft(shl).calc_known_zeros(input))
+                .map(|shl| Self::ShiftLeft(shl.into()).calc_known_zeros(input))
                 .fold(0, |acc, mask| acc & mask),
         }
     }
@@ -104,13 +102,13 @@ impl BitOp {
             Self::ShiftLeft(amt) => output >> amt,
             Self::ShiftRight(amt) => output << amt,
             Self::ArithRight(amt) => {
-                let needs_sign = output & left_mask::<u64>(amt) != 0;
+                let needs_sign = output & left_mask::<u64>(amt.into()) != 0;
                 (output << amt) | needs_sign.then_some(high_bit()).unwrap_or(0)
             }
-            Self::RotateRight(amt) => output.rotate_left(amt as u32),
+            Self::RotateRight(amt) => output.rotate_left(amt.into()),
             Self::And(mask) => output & mask.bits(),
             Self::Copy(mask) => iter_set_bits(mask)
-                .map(|shl| Self::ShiftLeft(shl).calc_used_bits(output))
+                .map(|shl| Self::ShiftLeft(shl.into()).calc_used_bits(output))
                 .fold(0, |acc, mask| acc | mask),
         }
     }
@@ -158,19 +156,6 @@ impl BitOp {
             },
         }
     }
-
-    pub fn validate(self) {
-        #[cfg(debug_assertions)]
-        debug_assert!(match self {
-            Self::Nop => true,
-            Self::ShiftLeft(amt) => amt < 64,
-            Self::ShiftRight(amt) => amt < 64,
-            Self::ArithRight(amt) => amt < 64,
-            Self::RotateRight(amt) => amt < 64,
-            Self::And(_) => true,
-            Self::Copy(_) => true,
-        })
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -187,17 +172,16 @@ impl BitOp {
 
         match (first, second) {
             // Two sucessive shifts in the same direction can be fused.
-            (Self::ShiftLeft(a), Self::ShiftLeft(b)) => One(match a + b {
-                sum @ 0..64 => Self::ShiftLeft(sum),
-                _ => Self::set_to_zero(),
+            (Self::ShiftLeft(a), Self::ShiftLeft(b)) => One(match a.checked_add(b) {
+                Some(sum) => Self::ShiftLeft(sum),
+                None => Self::set_to_zero(),
             }),
-            (Self::ShiftRight(a), Self::ShiftRight(b)) => One(match a + b {
-                sum @ 0..64 => Self::ShiftRight(sum),
-                _ => Self::set_to_zero(),
+            (Self::ShiftRight(a), Self::ShiftRight(b)) => One(match a.checked_add(b) {
+                Some(sum) => Self::ShiftRight(sum),
+                None => Self::set_to_zero(),
             }),
             (Self::ArithRight(a), Self::ArithRight(b)) => {
-                let sum = (a + b).min(63);
-                One(Self::ArithRight(sum))
+                One(Self::ArithRight(a.saturating_add(b)))
             }
             // Two opposed shifts are equivalent to a mask.
             // Note that a left shift followed by an arithmetic right shift
@@ -209,8 +193,7 @@ impl BitOp {
                 One(Self::And(PartialBits::full(u64::MAX << a)))
             }
             (Self::RotateRight(a), Self::RotateRight(b)) => {
-                let sum = (a + b) % 64;
-                One(Self::RotateRight(sum))
+                One(Self::RotateRight(a.wrapping_add(b)))
             }
             // Two successive masks can be fused.
             (Self::And(a), Self::And(b)) => One(Self::And(a & b)),
@@ -232,43 +215,55 @@ impl BitOp {
         }
     }
 
-    fn try_fuse_shl_and_mask(shl: u8, mask: PartialBits) -> RewriteResult {
+    fn try_fuse_shl_and_mask(shl: Bits6, mask: PartialBits) -> RewriteResult {
         use RewriteResult::*;
 
-        if shl == 0 {
+        if shl == Bits6::ZERO {
             return One(BitOp::And(mask));
         }
 
         match mask.as_bit_run() {
             BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => One(BitOp::set_to_zero()),
-            BitRun::Left { min, max } => match max >= 64 - shl {
+            BitRun::Left { min, max } => match max >= 64 - u8::from(shl) {
                 true => One(Self::ShiftLeft(shl)),
-                false => Two(Self::ShiftRight(64 + min - shl), Self::ShiftLeft(64 - min)),
+                false => Two(
+                    Self::ShiftRight((64 + min - u8::from(shl)).into()),
+                    Self::ShiftLeft((64 - min).into()),
+                ),
             },
             BitRun::Right { min, max } => match max == 64 {
                 true => One(Self::ShiftLeft(shl)),
-                false => Two(Self::ShiftLeft(64 + shl - min), Self::ShiftRight(64 - min)),
+                false => Two(
+                    Self::ShiftLeft((64 + u8::from(shl) - min).into()),
+                    Self::ShiftRight((64 - min).into()),
+                ),
             },
             BitRun::None => Preserve,
         }
     }
 
-    fn try_fuse_shr_and_mask(shr: u8, mask: PartialBits) -> RewriteResult {
+    fn try_fuse_shr_and_mask(shr: Bits6, mask: PartialBits) -> RewriteResult {
         use RewriteResult::*;
 
-        if shr == 0 {
+        if shr == Bits6::ZERO {
             return One(BitOp::And(mask));
         }
 
         match mask.as_bit_run() {
             BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => One(BitOp::set_to_zero()),
-            BitRun::Right { min, max } => match max >= 64 - shr {
+            BitRun::Right { min, max } => match max >= 64 - u8::from(shr) {
                 true => One(Self::ShiftRight(shr)),
-                false => Two(Self::ShiftLeft(64 + min - shr), Self::ShiftRight(64 - min)),
+                false => Two(
+                    Self::ShiftLeft((64 + min - u8::from(shr)).into()),
+                    Self::ShiftRight((64 - min).into()),
+                ),
             },
             BitRun::Left { min, max } => match max == 64 {
                 true => One(Self::ShiftRight(shr)),
-                false => Two(Self::ShiftRight(64 + shr - min), Self::ShiftLeft(64 - min)),
+                false => Two(
+                    Self::ShiftRight((64 + u8::from(shr) - min).into()),
+                    Self::ShiftLeft((64 - min).into()),
+                ),
             },
             BitRun::None => Preserve,
         }
@@ -282,9 +277,9 @@ impl Display for BitOp {
             Self::ShiftLeft(amt) => write!(f, "shl {amt}"),
             Self::ShiftRight(amt) => write!(f, "shr {amt}"),
             Self::ArithRight(amt) => write!(f, "sar {amt}"),
-            Self::RotateRight(amt) => match amt {
-                33..63 => write!(f, "rol {}", 64 - amt),
-                _ => write!(f, "ror {amt}"),
+            Self::RotateRight(amt) => match amt.neg() < amt {
+                true => write!(f, "rol {}", amt.neg()),
+                false => write!(f, "ror {amt}"),
             },
             Self::And(mask) => write!(f, "and {}", PrintBits(mask)),
             Self::Copy(0) => write!(f, "dup <none>"),

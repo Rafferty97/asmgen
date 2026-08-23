@@ -1,3 +1,4 @@
+pub use bits::*;
 pub use bitset::*;
 pub use iter_set_bits::*;
 pub use mask::*;
@@ -6,7 +7,7 @@ pub use print::PrintBits;
 pub use ratio::Ratio;
 
 pub mod aarch64;
-mod bit_rot;
+mod bits;
 mod bitset;
 mod iter_set_bits;
 mod mask;

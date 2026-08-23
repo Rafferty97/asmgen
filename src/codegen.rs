@@ -89,10 +89,10 @@ fn lower_bit_extract(builder: &mut FunctionBuilder, value: Value, extract: &BitE
 fn lower_bit_op(builder: &mut FunctionBuilder, value: Value, op: BitOp) -> Value {
     match op {
         BitOp::Nop => value,
-        BitOp::ShiftLeft(amt) => builder.ins().ishl_imm_u(value, amt as i64),
-        BitOp::ShiftRight(amt) => builder.ins().ushr_imm_u(value, amt as i64),
-        BitOp::ArithRight(amt) => builder.ins().sshr_imm_u(value, amt as i64),
-        BitOp::RotateRight(amt) => builder.ins().rotr_imm_u(value, amt as i64),
+        BitOp::ShiftLeft(amt) => builder.ins().ishl_imm_u(value, i64::from(amt)),
+        BitOp::ShiftRight(amt) => builder.ins().ushr_imm_u(value, i64::from(amt)),
+        BitOp::ArithRight(amt) => builder.ins().sshr_imm_u(value, i64::from(amt)),
+        BitOp::RotateRight(amt) => builder.ins().rotr_imm_u(value, i64::from(amt)),
         BitOp::And(mask) => builder.ins().band_imm_u(value, mask.min_bits() as i64), // fixme: not always optimal
         BitOp::Copy(mask) => match mask.count_ones() {
             0..3 => {
@@ -223,7 +223,7 @@ mod test {
     #[test]
     fn lower_bit_extract_test() {
         // let extract = BitExtract::ShiftMul { mask: 0b111_00000, rshift: 5, mul: 0b100 };
-        let extract = BitExtract::new().shr(3).and(0b11100);
+        let extract = BitExtract::new().shr(3.into()).and(0b11100);
         let cases = [
             (0b00_000_00000, 0b000_00),
             (0b11_111_11111, 0b111_00),

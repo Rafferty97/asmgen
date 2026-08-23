@@ -9,7 +9,7 @@ pub fn aarch64_logical_immediates() -> &'static HashSet<u64> {
 
         for size in [2, 4, 8, 16, 32, 64] {
             for num_ones in 1..size {
-                let pattern = BitSet::new(right_mask(num_ones as u8), size);
+                let pattern = BitSet::new(right_mask(num_ones), size);
                 let tiled = pattern.tile_u64();
                 for ror in 0..size {
                     let value = tiled.rotate_right(ror as u32);
