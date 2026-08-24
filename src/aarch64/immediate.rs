@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use crate::util::{BitSet, right_mask};
-
 pub fn aarch64_logical_immediates() -> &'static HashSet<u64> {
+    use crate::util::{BitSet, right_mask};
+
     static AARCH64_LOGICAL_IMMS: LazyLock<HashSet<u64>> = LazyLock::new(|| {
         let mut imms = HashSet::new();
 
@@ -39,14 +39,14 @@ pub fn is_aarch64_logical_immediate(value: u64) -> bool {
     false
 }
 
-pub fn is_tiled(value: u64, len: u8) -> bool {
+fn is_tiled(value: u64, len: u8) -> bool {
     value == value.rotate_right(len as u32)
 }
 
 /// Given a value that is a tiling of length `len`,
 /// determines whether this repeated pattern can be derived by
 /// rotating a contiguous run of one bits.
-pub fn is_rotated_run(value: u64, len: u8) -> bool {
+fn is_rotated_run(value: u64, len: u8) -> bool {
     // Clone the high bit to all bit positions
     let high_bit_mask = (value as i64) >> 63;
 

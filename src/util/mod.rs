@@ -6,7 +6,6 @@ pub use prim_int::PrimIntExt;
 pub use print::PrintBits;
 pub use ratio::Ratio;
 
-pub mod aarch64;
 mod bits;
 mod bitset;
 mod iter_set_bits;
