@@ -204,6 +204,8 @@ impl BitExtract {
 
     /// Calculates the total cost of the `BitExtract`.
     pub fn cost(&self) -> u16 {
+        const INS_COST: u16 = 16;
+
         if let Some(cost) = self.cost.get() {
             return cost;
         }
@@ -218,7 +220,7 @@ impl BitExtract {
 
         // Count cost of folding into the accumulator
         // fixme: this can be fused into the last op in some cases
-        cost += 1;
+        cost += INS_COST;
 
         self.cost.set(Some(cost));
         cost
@@ -487,22 +489,16 @@ impl BitPermutation {
             .map(BitExtract::optimised)
             .collect_vec();
 
-        // println!("CANDIDATES");
-        // println!("----------");
-        // for candidate in &candidates {
-        //     println!("{candidate}");
-        // }
-        // println!("");
+        for candidate in &candidates {
+            log::trace!("candidate: {candidate}");
+        }
 
         // Find minimum cost
         let extracts = min_cost_cover(candidates);
 
-        // println!("EXTRACTS");
-        // println!("----------");
-        // for extract in &extracts {
-        //     println!("{extract}");
-        // }
-        // println!("");
+        for extract in &extracts {
+            log::debug!("chosen extract: {extract}");
+        }
 
         // fixme: better API
         (self.fixed, extracts)

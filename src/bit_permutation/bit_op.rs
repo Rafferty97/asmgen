@@ -147,10 +147,10 @@ impl BitOp {
     /// Computes the cost of this operation,
     /// accounting for any potential fusion with the preceeding operation.
     pub fn cost(&self, prev: Option<BitOp>) -> u16 {
-        let isa = ISA;
-
         const INS_COST: u16 = 16;
         const IMM_COST: u16 = 1;
+
+        let isa = ISA;
 
         match self {
             Self::Nop => 0,

@@ -93,7 +93,13 @@ fn lower_bit_op(builder: &mut FunctionBuilder, value: Value, op: BitOp) -> Value
         BitOp::ShiftRight(amt) => builder.ins().ushr_imm_u(value, i64::from(amt)),
         BitOp::ArithRight(amt) => builder.ins().sshr_imm_u(value, i64::from(amt)),
         BitOp::RotateRight(amt) => builder.ins().rotr_imm_u(value, i64::from(amt)),
-        BitOp::And(mask) => builder.ins().band_imm_u(value, mask.min_bits() as i64), // fixme: not always optimal
+        BitOp::And(mask) => {
+            // fixme: find most efficient encoding amongst:
+            // - logical immediate
+            // - movz, movk chain
+            // - movn, movk chain
+            builder.ins().band_imm_u(value, mask.min_bits() as i64)
+        }
         BitOp::Copy(mask) => match mask.count_ones() {
             0..3 => {
                 let zero = builder.ins().iconst(ir::types::I64, 0);
