@@ -8,7 +8,6 @@ use fnv::FnvHashMap;
 use itertools::Itertools;
 
 pub use self::bit_op::BitOp;
-use crate::aarch64::immediate::is_aarch64_logical_immediate;
 use crate::peephole::run_peephole;
 use crate::util::{Bits6, Ratio};
 use crate::util::{PartialBits, PrimIntExt, PrintBits};
