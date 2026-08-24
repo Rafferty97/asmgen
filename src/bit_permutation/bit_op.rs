@@ -277,31 +277,33 @@ impl BitOp {
 
         let rol = ror.neg();
 
-        match mask.as_bit_run() {
-            BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => fuse(
-                BitOp::set_to_zero(),
-                "all bits are either shifted out, masked or unused",
-            ),
-            BitRun::Left { min, max } if (min..=max).contains(&rol.into()) => fuse(
-                BitOp::ShiftRight(ror),
-                &format!("the mask is {} ones followed by {ror} zeros", rol),
-            ),
-            BitRun::Left { min, .. } if u8::from(rol) > min => rewrite(
-                BitOp::ShiftRight((64 - min).into()),
-                BitOp::ShiftLeft(rol - min.into()),
-                &format!("the mask is {min} zeros followed by {} ones", 64 - min),
-            ),
-            BitRun::Right { min, max } if (min..=max).contains(&ror.into()) => fuse(
-                BitOp::ShiftLeft(rol),
-                &format!("the mask is {} zeros followed by {ror} ones", rol),
-            ),
-            BitRun::Right { min, .. } if u8::from(ror) > min => rewrite(
-                BitOp::ShiftLeft((64 - min).into()),
-                BitOp::ShiftRight(ror - min.into()),
-                &format!("the mask is {} ones followed by {min} zeros", 64 - min),
-            ),
-            _ => None,
-        }
+        return None; // fixme
+
+        // match mask.as_bit_run() {
+        //     BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => fuse(
+        //         BitOp::set_to_zero(),
+        //         "all bits are either shifted out, masked or unused",
+        //     ),
+        //     BitRun::Left { min, max } if (min..=max).contains(&rol.into()) => fuse(
+        //         BitOp::ShiftRight(ror),
+        //         &format!("the mask is {} ones followed by {ror} zeros", rol),
+        //     ),
+        //     BitRun::Left { min, .. } if u8::from(rol) > min => rewrite(
+        //         BitOp::ShiftRight((64 - min).into()),
+        //         BitOp::ShiftLeft(rol - min.into()),
+        //         &format!("the mask is {min} zeros followed by {} ones", 64 - min),
+        //     ),
+        //     BitRun::Right { min, max } if (min..=max).contains(&ror.into()) => fuse(
+        //         BitOp::ShiftLeft(rol),
+        //         &format!("the mask is {} zeros followed by {ror} ones", rol),
+        //     ),
+        //     BitRun::Right { min, .. } if u8::from(ror) > min => rewrite(
+        //         BitOp::ShiftLeft((64 - min).into()),
+        //         BitOp::ShiftRight(ror - min.into()),
+        //         &format!("the mask is {} ones followed by {min} zeros", 64 - min),
+        //     ),
+        //     _ => None,
+        // }
     }
 }
 

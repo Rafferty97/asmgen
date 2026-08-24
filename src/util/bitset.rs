@@ -1,6 +1,7 @@
 use std::ops::{BitAnd, BitOr, Shl, Shr};
 
 use arbitrary::Arbitrary;
+use cranelift_codegen::bitset::scalar::ScalarBitSetStorage;
 
 use crate::util::{Bits6, mask::right_mask};
 
@@ -112,20 +113,15 @@ impl PartialBits {
         self.bits
     }
 
-    pub fn as_bit_run(self) -> BitRun {
-        let min = (64 - self.ones().trailing_zeros()) as u8;
-        let max = self.zeros().leading_zeros() as u8;
-        if min <= max {
-            return BitRun::Left { min, max };
-        }
-
-        let min = (64 - self.ones().leading_zeros()) as u8;
-        let max = self.zeros().trailing_zeros() as u8;
-        if min <= max {
-            return BitRun::Right { min, max };
-        }
-
-        BitRun::None
+    pub fn as_bit_run(self) -> Option<BitRun> {
+        let (zeros, ones) = (self.zeros(), self.ones());
+        let lz = ones.leading_zeros();
+        let tz = ones.trailing_zeros();
+        let min_lo = (64 - (zeros & (!0 >> lz)).leading_zeros()) as u8;
+        let max_lo = tz as u8;
+        let min_hi = (64 - lz) as u8;
+        let max_hi = (zeros & (!0 << tz)).trailing_zeros() as u8;
+        (min_lo <= max_hi).then_some(BitRun { min_lo, max_lo, min_hi, max_hi })
     }
 
     pub fn contains(self, value: u64) -> bool {
@@ -182,20 +178,11 @@ impl Arbitrary<'_> for PartialBits {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BitRun {
-    None,
-    Left { min: u8, max: u8 },
-    Right { min: u8, max: u8 },
-}
-
-impl BitRun {
-    pub fn invert(self) -> Self {
-        match self {
-            Self::None => Self::None,
-            Self::Left { min, max } => Self::Right { min: 64 - max, max: 64 - min },
-            Self::Right { min, max } => Self::Left { min: 64 - max, max: 64 - min },
-        }
-    }
+pub struct BitRun {
+    min_lo: u8,
+    max_lo: u8,
+    min_hi: u8,
+    max_hi: u8,
 }
 
 #[cfg(test)]
@@ -226,5 +213,15 @@ mod test {
         assert!(c.contains(a.min_bits() & b.max_bits()));
         assert!(c.contains(a.max_bits() & b.min_bits()));
         assert!(c.contains(a.max_bits() & b.max_bits()));
+    }
+
+    #[test]
+    fn test_bit_runs() {
+        let bits = PartialBits::full(0x00ff_ff00_0000_0000);
+        let expected = BitRun { min_lo: 40, max_lo: 40, min_hi: 56, max_hi: 56 };
+        assert_eq!(bits.as_bit_run(), Some(expected));
+
+        let bits = PartialBits::full(0x00ff_8fff_0000_0000);
+        assert_eq!(bits.as_bit_run(), None);
     }
 }
