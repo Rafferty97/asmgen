@@ -137,7 +137,7 @@ impl BitExtract {
         //     println!("    {op}");
         // }
 
-        for i in 1..=2 {
+        for i in 1..=5 {
             log::trace!("OPT: Pass {i}: {}", self);
 
             let original = self.ops.clone();
