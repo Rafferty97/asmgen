@@ -275,35 +275,31 @@ impl BitOp {
             Some([op1, op2])
         };
 
+        let rol = ror.neg();
+
         match mask.as_bit_run() {
             BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => fuse(
                 BitOp::set_to_zero(),
                 "all bits are either shifted out, masked or unused",
             ),
-            BitRun::Left { min, max } if (min..=max).contains(&ror.neg().into()) => fuse(
+            BitRun::Left { min, max } if (min..=max).contains(&rol.into()) => fuse(
                 BitOp::ShiftRight(ror),
-                &format!("the mask is {} ones followed by {ror} zeros", ror.neg()),
+                &format!("the mask is {} ones followed by {ror} zeros", rol),
+            ),
+            BitRun::Left { min, .. } if u8::from(rol) > min => rewrite(
+                BitOp::ShiftRight((64 - min).into()),
+                BitOp::ShiftLeft(rol - min.into()),
+                &format!("the mask is {min} zeros followed by {} ones", 64 - min),
             ),
             BitRun::Right { min, max } if (min..=max).contains(&ror.into()) => fuse(
-                BitOp::ShiftLeft(ror.neg()),
-                &format!("the mask is {} zeros followed by {ror} ones", ror.neg()),
+                BitOp::ShiftLeft(rol),
+                &format!("the mask is {} zeros followed by {ror} ones", rol),
             ),
-            // BitRun::Right { min, max } => match max >= 64 - u8::from(shr) {
-            //     true => fuse(Self::ShiftRight(shr), ""),
-            //     false => rewrite(
-            //         Self::ShiftLeft((64 + min - u8::from(shr)).into()),
-            //         Self::ShiftRight((64 - min).into()),
-            //         "",
-            //     ),
-            // },
-            // BitRun::Left { min, max } => match max == 64 {
-            //     true => fuse(Self::ShiftRight(shr), ""),
-            //     false => rewrite(
-            //         Self::ShiftRight((64 + u8::from(shr) - min).into()),
-            //         Self::ShiftLeft((64 - min).into()),
-            //         "",
-            //     ),
-            // },
+            BitRun::Right { min, .. } if u8::from(ror) > min => rewrite(
+                BitOp::ShiftLeft((64 - min).into()),
+                BitOp::ShiftRight(ror - min.into()),
+                &format!("the mask is {} ones followed by {min} zeros", 64 - min),
+            ),
             _ => None,
         }
     }
@@ -317,9 +313,9 @@ impl Display for BitOp {
             Self::ShiftRight(amt) => write!(f, "shr {amt}"),
             Self::ArithRight(amt) => write!(f, "sar {amt}"),
             Self::RotateRight(amt) => write!(f, "ror {amt}"),
-            Self::And(mask) => write!(f, "and {:#x} {:#x}", mask.bits(), mask.used()), // PrintBits(mask)),
+            Self::And(mask) => write!(f, "and {}", PrintBits(mask)),
             Self::Copy(0) => write!(f, "dup <none>"),
-            Self::Copy(mask) => write!(f, "dup {:#x}", mask), // iter_set_bits(mask).join(", ")),
+            Self::Copy(mask) => write!(f, "dup [{}]", iter_set_bits(mask).join(", ")),
         }
     }
 }
@@ -402,9 +398,17 @@ mod test {
         let shift = BitOp::ShiftRight(7.into());
         assert_eq!(BitOp::try_fuse(mask, shift), [BitOp::Nop, shift]);
 
+        // Mask then right shift: mask clears contiguous low bits.
+        let mask = BitOp::And(0xfffffffffffff000.into());
+        let shift = BitOp::ShiftRight(5.into());
+        assert_eq!(
+            BitOp::try_fuse(mask, shift),
+            [BitOp::ShiftRight(12.into()), BitOp::ShiftLeft(7.into())]
+        );
+
         // Mask then right shift: mask cannot be elided.
-        let mask = BitOp::And(0xffffffffffffff80.into());
-        let shift = BitOp::ShiftRight(6.into());
+        let mask = BitOp::And(0xfffffffffff08000.into());
+        let shift = BitOp::ShiftRight(7.into());
         assert_eq!(BitOp::try_fuse(mask, shift), [mask, shift]);
 
         // Mask then left shift: mask only clears bits the shift discards.
@@ -412,8 +416,16 @@ mod test {
         let shift = BitOp::ShiftLeft(8.into());
         assert_eq!(BitOp::try_fuse(mask, shift), [BitOp::Nop, shift]);
 
+        // Mask then left shift: mask clears contiguous high bits.
+        let mask = BitOp::And(0x000fffffffffffff.into());
+        let shift = BitOp::ShiftLeft(5.into());
+        assert_eq!(
+            BitOp::try_fuse(mask, shift),
+            [BitOp::ShiftLeft(12.into()), BitOp::ShiftRight(7.into())]
+        );
+
         // Mask then left shift: mask cannot be elided.
-        let mask = BitOp::And(0x00ffffffffffffff.into());
+        let mask = BitOp::And(0x00010fffffffffff.into());
         let shift = BitOp::ShiftLeft(7.into());
         assert_eq!(BitOp::try_fuse(mask, shift), [mask, shift]);
 
