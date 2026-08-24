@@ -56,6 +56,22 @@ impl PartialBits {
         Self { bits, used }
     }
 
+    pub fn parse(src: &str) -> Self {
+        let mut bits = 0;
+        let mut used = 0;
+        for char in src.chars() {
+            let (new_bit, new_used) = match char {
+                '0' => (0, 1),
+                '1' => (1, 1),
+                c if !c.is_whitespace() => (0, 0),
+                _ => continue,
+            };
+            bits = (bits << 1) | new_bit;
+            used = (used << 1) | new_used;
+        }
+        Self::full(bits).with_used(used)
+    }
+
     pub const fn full(bits: u64) -> Self {
         Self { bits, used: u64::MAX }
     }

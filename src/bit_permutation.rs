@@ -132,12 +132,7 @@ impl BitExtract {
 
     /// Optimises the `BitExtract` by fusing operations where possible.
     pub fn optimise(&mut self) {
-        // println!("ORIGINAL {}", self.origin);
-        // for &op in &self.ops {
-        //     println!("    {op}");
-        // }
-
-        for i in 1..=5 {
+        for i in 1..=8 {
             log::trace!("OPT: Pass {i}: {}", self);
 
             let original = self.ops.clone();
@@ -178,11 +173,6 @@ impl BitExtract {
                 break;
             }
         }
-
-        // println!("OPTIMISED {}", self.origin);
-        // for &op in &self.ops {
-        //     println!("    {op}");
-        // }
 
         self.cost.set(None);
     }
@@ -272,24 +262,6 @@ impl Debug for BitExtract {
         }
         dbg.finish()
     }
-}
-
-fn cost_aarch64_logical_imm(imm: PartialBits) -> u16 {
-    if imm.min_bits() == 0 {
-        return 0;
-    }
-    if is_aarch64_logical_immediate(imm.min_bits()) {
-        return 0;
-    }
-    cost_aarch64_mat_imm(imm)
-}
-
-fn cost_aarch64_mat_imm(imm: PartialBits) -> u16 {
-    // fixme: optimise with `min_bits` and `max_bits`
-    let lanes = |v: u64| (0..4).map(move |i| (v >> 16 * i) & 0xffff);
-    let non_zero_lanes = lanes(imm.min_bits()).filter(|&bits| bits != 0).count();
-    let non_full_lanes = lanes(imm.max_bits()).filter(|&bits| bits != 0xffff).count();
-    non_zero_lanes.min(non_full_lanes.max(1)) as u16
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -423,9 +395,7 @@ impl BitPermutation {
                 let ex_ror = src_pos + 1;
 
                 // Next, arithmetic shift right by the minimum amount that covers all needed output bits
-                let sar_lz = bc_dst_mask
-                    .rotate_right((src_pos + rol) as u32)
-                    .leading_zeros();
+                let sar_lz = bc_dst_mask.rotate_right((src_pos + rol) as u32).leading_zeros();
                 let ex_sar = (63 - sar_lz) as u8;
 
                 // Verify that this combination is feasible
@@ -440,29 +410,18 @@ impl BitPermutation {
                 let ex_rol = ((rol as i32) + (src_pos as i32 + 1) + (63 - sar_lz as i32)) as u8;
 
                 let extract = BitExtract::new().with_origin(|| format!("shl {rol} + bc {src_pos}"));
-                Some(
-                    extract
-                        .ror(ex_ror.into())
-                        .sar(ex_sar.into())
-                        .rol(ex_rol.into())
-                        .and(dst_mask),
-                )
+                Some(extract.ror(ex_ror.into()).sar(ex_sar.into()).rol(ex_rol.into()).and(dst_mask))
             })
             .collect_vec();
         let shifts = shifts.into_iter().map(|ShiftExtract { rol, dst_mask }| {
             let extract = BitExtract::new().with_origin(|| format!("shl {rol}"));
             extract.rol(rol.into()).and(dst_mask)
         });
-        let broadcasts = broadcasts
-            .into_iter()
-            .map(|BroadcastExtract { src_pos, dst_mask }| {
-                let extract = BitExtract::new().with_origin(|| format!("bc {src_pos}"));
-                let sar = (63 - dst_mask.trailing_zeros()) as u8;
-                extract
-                    .shl((63 - src_pos).into())
-                    .sar(sar.into())
-                    .and(dst_mask)
-            });
+        let broadcasts = broadcasts.into_iter().map(|BroadcastExtract { src_pos, dst_mask }| {
+            let extract = BitExtract::new().with_origin(|| format!("bc {src_pos}"));
+            let sar = (63 - dst_mask.trailing_zeros()) as u8;
+            extract.shl((63 - src_pos).into()).sar(sar.into()).and(dst_mask)
+        });
         let repeats = repeats
             .into_iter()
             // fixme: other rotations
@@ -638,98 +597,9 @@ mod test {
 
     #[test]
     fn fuse_rotates() {
-        let extract = BitExtract::new()
-            .ror(12.into())
-            .rol(6.into())
-            .rol(9.into())
-            .ror(5.into());
+        let extract = BitExtract::new().ror(12.into()).rol(6.into()).rol(9.into()).ror(5.into());
         assert_eq!(extract.ops().len(), 4);
         let extract = extract.optimised();
         assert_eq!(extract.ops(), &[BitOp::RotateRight(2.into())]);
-    }
-
-    #[test]
-    fn test_cost_aarch64_mat_imm() {
-        // Zero: no nonzero lanes, movz path needs nothing (xzr).
-        let bits = PartialBits::full(0);
-        assert_eq!(cost_aarch64_mat_imm(bits), 0);
-
-        // All-ones: movn path covers every lane, but the movn itself still costs 1.
-        let bits = PartialBits::full(!0);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        // Single nonzero lane, each position: one movz.
-        let bits = PartialBits::full(0x0000_0000_0000_1234);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        let bits = PartialBits::full(0x0000_0000_1234_0000);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        let bits = PartialBits::full(0x0000_1234_0000_0000);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        let bits = PartialBits::full(0x1234_0000_0000_0000);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        // Single non-0xffff lane: movn + 0 movk beats movz + 3 movk.
-        let bits = PartialBits::full(0xffff_ffff_ffff_1234);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        let bits = PartialBits::full(0x1234_ffff_ffff_ffff);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        // Two nonzero lanes (the 0x00010001 mask from the multiply-broadcast case).
-        let bits = PartialBits::full(0x0000_0000_0001_0001);
-        assert_eq!(cost_aarch64_mat_imm(bits), 2);
-
-        // Two non-0xffff lanes.
-        let bits = PartialBits::full(0xffff_1234_5678_ffff);
-        assert_eq!(cost_aarch64_mat_imm(bits), 2);
-
-        // Three lanes each way; neither path wins, both cost 3.
-        let bits = PartialBits::full(0x1234_5678_0000_ffff);
-        assert_eq!(cost_aarch64_mat_imm(bits), 3);
-
-        // Four nonzero, four non-0xffff: 4 either way.
-        let bits = PartialBits::full(0x1234_5678_9abc_def0);
-        assert_eq!(cost_aarch64_mat_imm(bits), 4);
-
-        // A logical-immediate-shaped value still costs by lane count here; folding
-        // is decided by the caller, not this function.
-        let bits = PartialBits::full(0x0000_0000_0000_ffff);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        // Everything free: min_bits == 0 (movz path costs 0), so the min is 0.
-        let bits = PartialBits::full(0xdead_beef_dead_beef).with_used(0);
-        assert_eq!(cost_aarch64_mat_imm(bits), 0);
-
-        // One fully-free lane, rest constrained to zero: the free lane can go to 0.
-        let bits = PartialBits::full(0).with_used(0xffff_ffff_ffff_0000);
-        assert_eq!(cost_aarch64_mat_imm(bits), 0);
-
-        // One fully-free lane, rest constrained to 0xffff: free lane goes to 0xffff,
-        // so the movn path sees zero non-full lanes and costs 1.
-        let bits = PartialBits::full(0xffff_ffff_ffff_ffff).with_used(0xffff_ffff_ffff_0000);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        // Free bits *within* a lane that also has demanded ones: the lane is nonzero
-        // under min_bits regardless, so it still needs a movz.
-        let bits = PartialBits::full(0x0000_0000_0000_1234).with_used(0x0000_0000_0000_ff00);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        // Free bits within a lane whose demanded bits are all zero: min_bits clears
-        // the lane entirely, so it costs nothing on the movz path.
-        let bits = PartialBits::full(0).with_used(0x0000_0000_0000_00ff);
-        assert_eq!(cost_aarch64_mat_imm(bits), 0);
-
-        // Freedom lets the movn path win: three lanes are demanded-0xffff, the
-        // fourth is free and resolves to 0xffff.
-        let bits = PartialBits::full(0xffff_ffff_ffff_0000).with_used(0xffff_ffff_ffff_0000);
-        assert_eq!(cost_aarch64_mat_imm(bits), 1);
-
-        // Partial freedom that can't rescue either path: two lanes demand a mix of
-        // ones and zeros, so both min_bits and max_bits leave them dirty.
-        let bits = PartialBits::full(0x0000_1234_5678_0000).with_used(0x0000_ffff_ffff_0000);
-        assert_eq!(cost_aarch64_mat_imm(bits), 2);
     }
 }

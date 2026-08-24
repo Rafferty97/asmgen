@@ -3,7 +3,10 @@ use std::fmt::Debug;
 use arbitrary::Arbitrary;
 
 use super::*;
-use crate::util::{BitRun, Bits6, PartialBits, iter_set_bits, left_mask, right_mask};
+use crate::{
+    aarch64::immediate::cost_aarch64_immediate,
+    util::{BitRun, Bits6, PartialBits, iter_set_bits, left_mask, right_mask},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Arbitrary)]
 pub enum BitOp {
@@ -104,9 +107,7 @@ impl BitOp {
             Self::ArithRight(amt) => ((value as i64) >> amt) as u64,
             Self::RotateRight(amt) => value.rotate_right(amt.into()),
             Self::And(mask) => value & mask.bits(),
-            Self::Copy(mask) => iter_set_bits(mask)
-                .map(|k| value << k)
-                .fold(0, |a, b| a | b),
+            Self::Copy(mask) => iter_set_bits(mask).map(|k| value << k).fold(0, |a, b| a | b),
         }
     }
 
@@ -161,7 +162,7 @@ impl BitOp {
             },
             Self::RotateRight(_) => INS_COST,
             Self::And(mask) => match isa {
-                Isa::AArch64 => INS_COST + cost_aarch64_logical_imm(*mask) * IMM_COST,
+                Isa::AArch64 => INS_COST + cost_aarch64_immediate(*mask, true) * IMM_COST,
                 _ => 2 * INS_COST,
             },
             Self::Copy(mask) => match (mask.count_ones(), mask.leading_zeros()) {
@@ -178,9 +179,8 @@ impl BitOp {
                 },
                 _ => match isa {
                     Isa::AArch64 => {
-                        let ins = 3 * INS_COST;
-                        let imm = cost_aarch64_mat_imm(PartialBits::full(*mask)) * IMM_COST;
-                        ins + imm
+                        let insts = cost_aarch64_immediate((*mask).into(), false);
+                        3 * INS_COST + insts * IMM_COST
                     }
                     _ => 4 * INS_COST,
                 },
@@ -355,10 +355,7 @@ mod test {
     fn fuzz_case_2() {
         env_logger::try_init().ok();
 
-        let extract = BitExtract::new()
-            .sar(9.into())
-            .and(0xfe00000000000000)
-            .shr(7.into());
+        let extract = BitExtract::new().sar(9.into()).and(0xfe00000000000000).shr(7.into());
         let input = 439177129557;
 
         let result = extract.exec(input);
