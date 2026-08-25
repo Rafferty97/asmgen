@@ -3,10 +3,8 @@ use std::fmt::Debug;
 use arbitrary::Arbitrary;
 
 use super::*;
-use crate::{
-    aarch64::immediate::cost_aarch64_immediate,
-    util::{BitRun, Bits6, PartialBits, iter_set_bits, left_mask, right_mask},
-};
+use crate::aarch64::immediate::cost_aarch64_immediate;
+use crate::util::{Bits6, PartialBits, iter_set_bits, left_mask, right_mask};
 
 #[derive(Clone, Copy, PartialEq, Eq, Arbitrary)]
 pub enum BitOp {
@@ -238,32 +236,25 @@ impl BitOp {
             // A shift/mask pair that can be rewritten as two shifts can sometimes
             // be lowered to better machine code, and will never be worse.
             (Self::And(mask), Self::ShiftLeft(shl)) => {
-                // Combine the mask with the source bits that the left shift shifts out
-                let m = mask & (PartialBits::MAX >> shl);
-                Self::try_fuse_mask_and_rot(m, shl.neg()).unwrap_or(preserve)
+                Self::try_fuse_mask_and_shift(mask, shl.into(), 0).unwrap_or(preserve)
             }
             (Self::ShiftLeft(shl), Self::And(mask)) => {
-                // Shift the mask to map it to source bits
-                let m = mask >> shl;
-                Self::try_fuse_mask_and_rot(m, shl.neg()).unwrap_or(preserve)
+                Self::try_fuse_mask_and_shift(mask >> shl, shl.into(), 0).unwrap_or(preserve)
             }
             (Self::And(mask), Self::ShiftRight(shr)) => {
-                // Combine the mask with the source bits that the right shift shifts out
-                let m = mask & (PartialBits::MAX << shr);
-                Self::try_fuse_mask_and_rot(m, shr).unwrap_or(preserve)
+                Self::try_fuse_mask_and_shift(mask, 0, shr.into()).unwrap_or(preserve)
             }
             (Self::ShiftRight(shr), Self::And(mask)) => {
-                // Shift the mask to map it to source bits
-                let m = mask << shr;
-                Self::try_fuse_mask_and_rot(m, shr).unwrap_or(preserve)
+                Self::try_fuse_mask_and_shift(mask << shr, 0, shr.into()).unwrap_or(preserve)
             }
             _ => preserve,
         }
     }
 
-    fn try_fuse_mask_and_rot(mask: PartialBits, ror: Bits6) -> Option<[Self; 2]> {
+    fn try_fuse_mask_and_shift(mask: PartialBits, shl: u8, shr: u8) -> Option<[Self; 2]> {
+        debug_assert!(shl == 0 || shr == 0);
         log::trace!("OPT:      (effective pre-mask: {})", PrintBits(mask));
-        log::trace!("OPT:      (effective right rotation: {ror})");
+        log::trace!("OPT:      (shift: shl {shl}, shr {shr})");
 
         let fuse = |op: Self, reason: &str| {
             log::trace!("OPT:     Fused into \"{op}\", because {reason}");
@@ -275,35 +266,47 @@ impl BitOp {
             Some([op1, op2])
         };
 
-        let rol = ror.neg();
+        let mask = mask.with_used((!0 >> shl) & (!0 << shr));
+        let (zeros, ones) = (mask.zeros(), mask.ones());
 
-        return None; // fixme
+        if zeros == 0 {
+            let op = match (shl, shr) {
+                (_, 0) => Self::ShiftLeft(shl.into()),
+                (0, _) => Self::ShiftRight(shr.into()),
+                _ => unreachable!(),
+            };
+            return fuse(op, "no bits that survive the shift need to be cleared");
+        }
 
-        // match mask.as_bit_run() {
-        //     BitRun::Left { min: 0, .. } | BitRun::Right { min: 0, .. } => fuse(
-        //         BitOp::set_to_zero(),
-        //         "all bits are either shifted out, masked or unused",
-        //     ),
-        //     BitRun::Left { min, max } if (min..=max).contains(&rol.into()) => fuse(
-        //         BitOp::ShiftRight(ror),
-        //         &format!("the mask is {} ones followed by {ror} zeros", rol),
-        //     ),
-        //     BitRun::Left { min, .. } if u8::from(rol) > min => rewrite(
-        //         BitOp::ShiftRight((64 - min).into()),
-        //         BitOp::ShiftLeft(rol - min.into()),
-        //         &format!("the mask is {min} zeros followed by {} ones", 64 - min),
-        //     ),
-        //     BitRun::Right { min, max } if (min..=max).contains(&ror.into()) => fuse(
-        //         BitOp::ShiftLeft(rol),
-        //         &format!("the mask is {} zeros followed by {ror} ones", rol),
-        //     ),
-        //     BitRun::Right { min, .. } if u8::from(ror) > min => rewrite(
-        //         BitOp::ShiftLeft((64 - min).into()),
-        //         BitOp::ShiftRight(ror - min.into()),
-        //         &format!("the mask is {} ones followed by {min} zeros", 64 - min),
-        //     ),
-        //     _ => None,
-        // }
+        if ones == 0 {
+            let op = Self::set_to_zero();
+            return fuse(op, "no bits that survive the shift need to be preserved");
+        }
+
+        // Left mask (clears contiguous low bits)
+        if zeros.leading_zeros() + ones.trailing_zeros() >= 64 {
+            let len = ones.trailing_zeros() as u8;
+            debug_assert!(len >= shr);
+
+            let shr_op = Self::ShiftRight(len.into());
+            let shl_op = Self::ShiftLeft((len + shl - shr).into());
+            let reason = format!("the mask is equivalent to clearing the low {len} bits");
+            return rewrite(shr_op, shl_op, &reason);
+        }
+
+        // Right mask (clears contiguous high bits)
+        if zeros.trailing_zeros() + ones.leading_zeros() >= 64 {
+            let len = ones.leading_zeros() as u8;
+            debug_assert!(len >= shr);
+
+            let shl_op = Self::ShiftLeft(len.into());
+            let shr_op = Self::ShiftRight((len + shr - shl).into());
+            let reason = format!("the mask is equivalent to clearing the high {len} bits");
+            return rewrite(shl_op, shr_op, &reason);
+        }
+
+        // The mask cannot be elided or rewritten to a shift
+        None
     }
 }
 
@@ -435,7 +438,7 @@ mod test {
 
         // Right shift then mask: mask cannot be elided.
         let shift = BitOp::ShiftRight(7.into());
-        let mask = BitOp::And(0x00ffffffffffffff.into());
+        let mask = BitOp::And(0x00fffffffffffff0.into());
         assert_eq!(BitOp::try_fuse(shift, mask), [shift, mask]);
 
         // Left shift then mask: shift already zeroed the masked-off bits.
@@ -445,7 +448,7 @@ mod test {
 
         // Left shift then mask: mask cannot be elided.
         let shift = BitOp::ShiftLeft(7.into());
-        let mask = BitOp::And(0xffffffffffffff00.into());
+        let mask = BitOp::And(0x0fffffffffffff00.into());
         assert_eq!(BitOp::try_fuse(shift, mask), [shift, mask]);
     }
 }
