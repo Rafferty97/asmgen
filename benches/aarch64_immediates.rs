@@ -1,13 +1,13 @@
-use asmgen::aarch64::immediate::{aarch64_logical_immediates, is_aarch64_logical_immediate};
+use asmgen::target::aarch64::immediate::{
+    aarch64_logical_immediates, is_aarch64_logical_immediate,
+};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use itertools::Itertools;
 use rand::seq::SliceRandom;
 
 fn bench_right_mask(c: &mut Criterion) {
-    let mut inputs = aarch64_logical_immediates()
-        .iter()
-        .flat_map(|&i| [i, i ^ 0xabcd])
-        .collect_vec();
+    let mut inputs =
+        aarch64_logical_immediates().iter().flat_map(|&i| [i, i ^ 0xabcd]).collect_vec();
     inputs.shuffle(&mut rand::rng());
 
     c.bench_function("is_aarch64_logical_immediate", |b| {

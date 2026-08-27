@@ -9,13 +9,15 @@ use itertools::Itertools;
 
 pub use self::bit_op::BitOp;
 use crate::peephole::run_peephole;
-use crate::util::{Bits6, Ratio};
+use crate::util::{Bits, Ratio};
 use crate::util::{PartialBits, PrimIntExt, PrintBits};
 use crate::util::{middle_mask, right_mask};
 
 mod bit_op;
 
 static ISA: Isa = Isa::AArch64;
+
+type Bits6 = Bits<6>;
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct BitPermutation {

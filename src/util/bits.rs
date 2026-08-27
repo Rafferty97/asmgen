@@ -1,15 +1,11 @@
-use std::{
-    fmt::Display,
-    ops::{Add, Shl, Shr, Sub},
-};
+use std::fmt::Display;
+use std::ops::{Add, Shl, Shr, Sub};
 
 use arbitrary::Arbitrary;
 
 /// An integer that is `N` bits wide.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Bits<const N: u32>(u32);
-
-pub type Bits6 = Bits<6>;
 
 impl<const N: u32> Bits<N> {
     pub const ZERO: Self = Self(0);
@@ -134,6 +130,8 @@ impl<const N: u32> Arbitrary<'_> for Bits<N> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    type Bits6 = Bits<6>;
 
     #[test]
     fn bits_max_value() {

@@ -2,7 +2,7 @@ use std::ops::{BitAnd, BitOr, Shl, Shr};
 
 use arbitrary::Arbitrary;
 
-use crate::util::{Bits6, mask::right_mask};
+use crate::util::{Bits, mask::right_mask};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BitSet {
@@ -143,18 +143,18 @@ impl BitAnd for PartialBits {
     }
 }
 
-impl Shl<Bits6> for PartialBits {
+impl<const N: u32> Shl<Bits<N>> for PartialBits {
     type Output = Self;
 
-    fn shl(self, rhs: Bits6) -> Self {
+    fn shl(self, rhs: Bits<N>) -> Self {
         Self::new(self.bits << rhs, !(!self.used << rhs))
     }
 }
 
-impl Shr<Bits6> for PartialBits {
+impl<const N: u32> Shr<Bits<N>> for PartialBits {
     type Output = Self;
 
-    fn shr(self, rhs: Bits6) -> Self {
+    fn shr(self, rhs: Bits<N>) -> Self {
         Self::new(self.bits >> rhs, !(!self.used >> rhs))
     }
 }

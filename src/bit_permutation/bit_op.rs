@@ -3,8 +3,10 @@ use std::fmt::Debug;
 use arbitrary::Arbitrary;
 
 use super::*;
-use crate::aarch64::immediate::cost_aarch64_immediate;
-use crate::util::{Bits6, PartialBits, iter_set_bits, left_mask, right_mask};
+use crate::target::aarch64::immediate::cost_aarch64_immediate;
+use crate::util::{Bits, PartialBits, iter_set_bits, left_mask, right_mask};
+
+type Bits6 = Bits<6>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Arbitrary)]
 pub enum BitOp {
