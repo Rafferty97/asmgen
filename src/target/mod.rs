@@ -1,6 +1,7 @@
 use crate::util::PartialBits;
 
 pub mod aarch64;
+pub mod x86;
 
 pub trait CostModel {
     fn imm(&self, imm: PartialBits) -> Cost;
