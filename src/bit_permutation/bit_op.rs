@@ -299,7 +299,7 @@ impl BitOp {
         // Right mask (clears contiguous high bits)
         if zeros.trailing_zeros() + ones.leading_zeros() >= 64 {
             let len = ones.leading_zeros() as u8;
-            debug_assert!(len >= shr);
+            debug_assert!(len >= shl);
 
             let shl_op = Self::ShiftLeft(len.into());
             let shr_op = Self::ShiftRight((len + shr - shl).into());
