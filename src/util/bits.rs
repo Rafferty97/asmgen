@@ -4,7 +4,7 @@ use std::ops::{Add, Shl, Shr, Sub};
 use arbitrary::Arbitrary;
 
 /// An integer that is `N` bits wide.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Bits<const N: u32>(u32);
 
 impl<const N: u32> Bits<N> {

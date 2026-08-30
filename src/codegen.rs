@@ -68,14 +68,22 @@ pub fn lower_bit_permutation(
 ) -> Value {
     use cranelift_codegen::ir::types::I64;
 
-    let (fixed, extracts) = permutation.compile();
+    let (xor_mask, extracts) = permutation.compile();
 
-    let mut result = builder.ins().iconst(I64, fixed as i64);
+    let mut result = None;
     for extract in extracts {
         let bits = lower_bit_extract(builder, src, &extract);
-        result = builder.ins().bor(result, bits);
+        result = Some(match result {
+            None => bits,
+            Some(v) => builder.ins().bor(bits, v),
+        });
     }
-    result
+
+    match (result, xor_mask as i64) {
+        (None, xor_mask) => builder.ins().iconst(I64, xor_mask as i64),
+        (Some(bits), 0) => bits,
+        (Some(bits), xor_mask) => builder.ins().bxor_imm_u(bits, xor_mask),
+    }
 }
 
 fn lower_bit_extract(builder: &mut FunctionBuilder, value: Value, extract: &BitExtract) -> Value {
@@ -212,7 +220,7 @@ mod test {
 
     #[test]
     fn fuzz_case1() {
-        let mut perm = BitPermutation::new();
+        let mut perm = BitPermutation::empty();
         perm.push(BitPermutationPart::Repeat { len: 62, src_pos: 17 });
         perm.push(BitPermutationPart::Repeat { len: 2, src_pos: 0 });
         test_bit_perm(&perm, &[0x3b0a083b850f0e0e]);
@@ -220,7 +228,7 @@ mod test {
 
     #[test]
     fn extract_riscv5_i_imm() {
-        let mut perm = BitPermutation::new();
+        let mut perm = BitPermutation::empty();
         perm.push(BitPermutationPart::Slice { len: 12, src_pos: 20 });
         perm.push(BitPermutationPart::Repeat { len: 52, src_pos: 31 });
         test_bit_perm(&perm, &[0, 0x3b0a083b850f0e0e]);
